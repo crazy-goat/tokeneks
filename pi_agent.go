@@ -177,6 +177,9 @@ type piSession struct {
 	Birth         time.Time
 	LastActivity  time.Time
 	DominantModel string
+	ParentID      string
+	ChildCount    int
+	IsSubsession  bool
 }
 
 func piSessions(days int, date string) ([]piSession, error) {
@@ -194,9 +197,9 @@ func piSessions(days int, date string) ([]piSession, error) {
 		if !dirEntry.IsDir() {
 			continue
 		}
-		subDir := filepath.Join(baseDir, dirEntry.Name())
+		projectDir := filepath.Join(baseDir, dirEntry.Name())
 
-		files, err := os.ReadDir(subDir)
+		files, err := os.ReadDir(projectDir)
 		if err != nil {
 			continue
 		}
@@ -206,14 +209,14 @@ func piSessions(days int, date string) ([]piSession, error) {
 				continue
 			}
 
-			fp := filepath.Join(subDir, fileEntry.Name())
+			fp := filepath.Join(projectDir, fileEntry.Name())
 			info, err := os.Stat(fp)
 			if err != nil {
 				continue
 			}
 
 			if date != "" {
-				if fileEntry.Name()[:10] != date {
+				if len(fileEntry.Name()) < 10 || fileEntry.Name()[:10] != date {
 					continue
 				}
 			} else {
@@ -233,9 +236,12 @@ func piSessions(days int, date string) ([]piSession, error) {
 			if title == "" {
 				title = project
 			}
+			sessionBase := strings.TrimSuffix(fileEntry.Name(), ".jsonl")
+			sessionID := strings.TrimSuffix(strings.SplitN(fileEntry.Name(), "_", 2)[1], ".jsonl")
+			childCount := piSubsessionCount(filepath.Join(projectDir, sessionBase), cutoff, date)
 
 			sessions = append(sessions, piSession{
-				ID:            strings.TrimSuffix(strings.SplitN(fileEntry.Name(), "_", 2)[1], ".jsonl"),
+				ID:            sessionID,
 				Filepath:      fp,
 				Project:       project,
 				Title:         title,
@@ -245,6 +251,7 @@ func piSessions(days int, date string) ([]piSession, error) {
 				Birth:         getCreatedAt(fp),
 				LastActivity:  data.LastActivity,
 				DominantModel: data.DominantModel,
+				ChildCount:    childCount,
 			})
 		}
 	}
@@ -255,6 +262,106 @@ func piSessions(days int, date string) ([]piSession, error) {
 	})
 
 	return sessions, nil
+}
+
+func piSubsessionPaths(sessionFilepath string) []string {
+	sessionDir := strings.TrimSuffix(sessionFilepath, ".jsonl")
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		runDirs, err := os.ReadDir(filepath.Join(sessionDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		for _, runDir := range runDirs {
+			if !runDir.IsDir() || !strings.HasPrefix(runDir.Name(), "run-") {
+				continue
+			}
+			fp := filepath.Join(sessionDir, entry.Name(), runDir.Name(), "session.jsonl")
+			if info, err := os.Stat(fp); err == nil && !info.IsDir() {
+				paths = append(paths, fp)
+			}
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func piSubsessionCount(sessionDir string, cutoff time.Time, date string) int {
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		runDirs, err := os.ReadDir(filepath.Join(sessionDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		for _, runDir := range runDirs {
+			if !runDir.IsDir() || !strings.HasPrefix(runDir.Name(), "run-") {
+				continue
+			}
+			fp := filepath.Join(sessionDir, entry.Name(), runDir.Name(), "session.jsonl")
+			info, err := os.Stat(fp)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			if date != "" {
+				if info.ModTime().UTC().Format("2006-01-02") != date {
+					continue
+				}
+			} else if info.ModTime().Before(cutoff) {
+				continue
+			}
+			count++
+		}
+	}
+	return count
+}
+
+func piParentSessionInfo(fp string) (parentPath, parentID string, ok bool) {
+	runDir := filepath.Dir(fp)
+	if !strings.HasPrefix(filepath.Base(runDir), "run-") {
+		return "", "", false
+	}
+	runIDDir := filepath.Dir(runDir)
+	parentDir := filepath.Dir(runIDDir)
+	parentBase := filepath.Base(parentDir)
+	parentPath = parentDir + ".jsonl"
+	if _, err := os.Stat(parentPath); err != nil {
+		return "", "", false
+	}
+	parts := strings.SplitN(parentBase, "_", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parentPath, parts[1], true
+}
+
+func piSessionIDFromPath(fp string) string {
+	base := filepath.Base(fp)
+	if strings.HasSuffix(base, ".jsonl") && strings.Contains(base, "_") {
+		parts := strings.SplitN(strings.TrimSuffix(base, ".jsonl"), "_", 2)
+		if len(parts) == 2 {
+			return parts[1]
+		}
+	}
+	if base == "session.jsonl" {
+		runDir := filepath.Dir(fp)
+		runIDDir := filepath.Dir(runDir)
+		return filepath.Base(runIDDir)
+	}
+	return strings.TrimSuffix(base, ".jsonl")
 }
 
 func cleanProjectName(dirName string) string {
@@ -285,13 +392,28 @@ func resolvePISessionPath(input string) (string, string, error) {
 			matches = append(matches, sess)
 		}
 	}
-	if len(matches) == 0 {
-		return "", "", fmt.Errorf("PI session not found: %s", input)
+	if len(matches) == 1 {
+		return matches[0].Filepath, matches[0].ID, nil
 	}
 	if len(matches) > 1 {
 		return "", "", fmt.Errorf("multiple PI sessions found for ID %s", input)
 	}
-	return matches[0].Filepath, matches[0].ID, nil
+
+	var childMatches []string
+	for _, sess := range sessions {
+		for _, childPath := range piSubsessionPaths(sess.Filepath) {
+			if piSessionIDFromPath(childPath) == input {
+				childMatches = append(childMatches, childPath)
+			}
+		}
+	}
+	if len(childMatches) == 0 {
+		return "", "", fmt.Errorf("PI session not found: %s", input)
+	}
+	if len(childMatches) > 1 {
+		return "", "", fmt.Errorf("multiple PI sessions found for ID %s", input)
+	}
+	return childMatches[0], input, nil
 }
 
 func piDetail(input string) error {

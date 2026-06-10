@@ -144,7 +144,73 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 				TotalCost:       totalCost,
 				Messages:        len(data.Steps),
 				ToolCalls:       data.ToolCalls,
+				ParentID:        sess.ParentID,
+				ChildCount:      sess.ChildCount,
+				IsSubsession:    sess.IsSubsession,
 			})
+			for _, childPath := range piSubsessionPaths(sess.Filepath) {
+				childData, err := piSessionUsage(childPath)
+				if err != nil || len(childData.Steps) == 0 {
+					continue
+				}
+				childByModel := make(map[string]*WebModelUsage)
+				for _, step := range childData.Steps {
+					if _, ok := childByModel[step.Model]; !ok {
+						provider := childData.ModelProviders[step.Model]
+						childByModel[step.Model] = &WebModelUsage{Model: step.Model, Provider: provider}
+					}
+					u := childByModel[step.Model]
+					u.Input += step.Step.Input
+					u.CacheRead += step.Step.CacheRead
+					u.CacheWrite += step.Step.CacheCreation
+					u.Output += step.Step.Output
+					u.Cost += step.Cost
+					u.Messages++
+				}
+				var childModels []WebModelUsage
+				var childInput, childPromptInput, childOutput, childCR, childCW int
+				var childCost float64
+				for _, u := range childByModel {
+					childCost += u.Cost
+					childInput += u.Input
+					childPromptInput += u.Input + u.CacheWrite
+					childOutput += u.Output
+					childCR += u.CacheRead
+					childCW += u.CacheWrite
+					childModels = append(childModels, *u)
+				}
+				sort.Slice(childModels, func(i, j int) bool {
+					return childModels[i].Cost > childModels[j].Cost
+				})
+				childBirth := getCreatedAt(childPath)
+				childLastAt := childData.LastActivity.UTC().Format("2006-01-02 15:04:05")
+				if childData.LastActivity.IsZero() {
+					childLastAt = childBirth.UTC().Format("2006-01-02 15:04:05")
+				}
+				childTitle := childData.Title
+				if childTitle == "" {
+					childTitle = sess.Title
+				}
+				result = append(result, WebSession{
+					Agent:           "PI",
+					ID:              piSessionIDFromPath(childPath),
+					Date:            childBirth.UTC().Format("2006-01-02 15:04"),
+					Project:         childTitle,
+					DominantModel:   childData.DominantModel,
+					LastMessage:     childLastAt,
+					Models:          childModels,
+					TotalInput:      childInput,
+					PromptInput:     childPromptInput,
+					TotalOutput:     childOutput,
+					TotalCacheRead:  childCR,
+					TotalCacheWrite: childCW,
+					TotalCost:       childCost,
+					Messages:        len(childData.Steps),
+					ToolCalls:       childData.ToolCalls,
+					ParentID:        sess.ID,
+					IsSubsession:    true,
+				})
+			}
 		}
 	}
 

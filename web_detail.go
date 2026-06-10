@@ -655,10 +655,19 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 	}
 
 	birth := getCreatedAt(fp)
-	sessID := strings.TrimSuffix(filepath.Base(fp), ".jsonl")
-	sessID = strings.SplitN(sessID, "_", 2)[1]
-	dir := filepath.Base(filepath.Dir(fp))
-	project := cleanProjectName(dir)
+	sessID := piSessionIDFromPath(fp)
+	projectDir := filepath.Base(filepath.Dir(fp))
+	project := cleanProjectName(projectDir)
+	if parentPath, parentID, ok := piParentSessionInfo(fp); ok {
+		projectDir = filepath.Base(filepath.Dir(parentPath))
+		project = cleanProjectName(projectDir)
+		parentTitle := project
+		if parentData, err := piSessionUsage(parentPath); err == nil && parentData.Title != "" {
+			parentTitle = parentData.Title
+		}
+		dParent := &SessionLink{Agent: "PI", ID: parentID, Title: parentTitle, Project: project}
+		_ = dParent
+	}
 
 	var totalCost float64
 	for _, s := range steps {
@@ -673,6 +682,37 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 		Date:      birth.UTC().Format("2006-01-02 15:04"),
 		Steps:     steps,
 		TotalCost: totalCost,
+	}
+	if parentPath, parentID, ok := piParentSessionInfo(fp); ok {
+		parentTitle := project
+		if parentData, err := piSessionUsage(parentPath); err == nil && parentData.Title != "" {
+			parentTitle = parentData.Title
+		}
+		d.Parent = &SessionLink{Agent: "PI", ID: parentID, Title: parentTitle, Project: project}
+	}
+	for _, childPath := range piSubsessionPaths(fp) {
+		childDetail, err := piSessionDetail(childPath)
+		if err != nil {
+			continue
+		}
+		childTitle := childDetail.Title
+		if childTitle == "" {
+			childTitle = childDetail.Project
+		}
+		d.Children = append(d.Children, SessionLink{
+			Agent:           "PI",
+			ID:              childDetail.ID,
+			Title:           childTitle,
+			Project:         childDetail.Project,
+			Model:           childDetail.Model,
+			TotalInput:      childDetail.TotalInput,
+			TotalOutput:     childDetail.TotalOutput,
+			TotalCacheRead:  childDetail.TotalCacheRead,
+			TotalCacheWrite: childDetail.TotalCacheWrite,
+			CacheHitRate:    childDetail.CacheHitRate,
+			Steps:           len(childDetail.Steps),
+			TotalCost:       childDetail.TotalCost,
+		})
 	}
 	fillSessionStats(d)
 	return d, scanner.Err()
