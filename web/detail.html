@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TokenEKS Session Detail</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; padding: 20px; }
+  .page { width: 100%; margin: 0; }
+  a { color: #38bdf8; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  h1 { font-size: 1.4rem; margin-bottom: 8px; }
+  .subtitle { color: #94a3b8; margin-bottom: 20px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+  .meta span { background: #1e293b; padding: 6px 12px; border-radius: 6px; font-size: 0.85rem; }
+  .relations { margin: 0 0 16px; display: flex; flex-direction: column; gap: 8px; }
+  .relation-card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px 14px; }
+  .relation-card .label { color: #94a3b8; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .relation-links { display: flex; flex-wrap: wrap; gap: 8px; }
+  .relation-link { display: inline-flex; align-items: center; gap: 6px; background: #162032; border: 1px solid #334155; border-radius: 999px; padding: 6px 10px; color: #e2e8f0; text-decoration: none; font-size: 0.82rem; }
+  .relation-link:hover { background: #202b40; text-decoration: none; }
+  .relation-agent { color: #38bdf8; font-weight: 700; }
+  .children-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  .children-table th, .children-table td { padding: 8px 10px; border-bottom: 1px solid #334155; font-size: 0.8rem; }
+  .children-table th { text-align: left; color: #94a3b8; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .children-table td.num, .children-table th.num { text-align: right; }
+  .children-table tr:last-child td { border-bottom: none; }
+  .children-table .session-link { color: #e2e8f0; text-decoration: none; }
+  .children-table .session-link:hover { text-decoration: underline; }
+  .stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+  .stats span { background: #162032; padding: 5px 10px; border-radius: 6px; font-size: 0.78rem; }
+  .stats .label { color: #94a3b8; }
+  .stats .val { color: #e2e8f0; font-weight: 600; margin-left: 4px; }
+  .stats .val.good { color: #22c55e; }
+  .stats .val.warn { color: #fbbf24; }
+  .stats .val.bad { color: #fb7185; }
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .stats-card { background: #1e293b; border-radius: 8px; padding: 16px; border: 1px solid #334155; width: 100%; }
+  .stats-card h3 { font-size: 0.85rem; color: #94a3b8; margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stats-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .stats-table th { text-align: left; font-size: 0.72rem; color: #94a3b8; padding: 6px 8px; border-bottom: 1px solid #334155; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stats-table th:last-child, .stats-table td:last-child { text-align: right; }
+  .stats-table td { padding: 8px; font-size: 0.82rem; color: #e2e8f0; border-bottom: 1px solid #1e293b; }
+  .stats-table tr:last-child td { border-bottom: none; }
+  .stats-table .model-name { font-weight: 600; }
+  .stats-table .total-name { font-weight: 600; color: #e2e8f0; }
+  .stats-table .val { font-weight: 600; }
+  .stats-table .val.good { color: #22c55e; }
+  .stats-table .val.warn { color: #fbbf24; }
+  .stats-table .val.bad { color: #fb7185; }
+  .stats-table .row-label { color: #94a3b8; font-weight: 600; white-space: nowrap; }
+  .stats-table .section-row td { padding-top: 14px; color: #94a3b8; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stats-table .section-row:first-child td { padding-top: 8px; }
+  .stats-table .wide-cell { font-size: 0.75rem; white-space: pre-line; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 20px; margin-bottom: 24px; }
+  .chart-container { background: #1e293b; border-radius: 8px; padding: 16px; }
+  .chart-container h2 { font-size: 1rem; margin-bottom: 12px; }
+  canvas { max-height: 280px; }
+  .steps-table-wrap { width: 100%; background: #1e293b; border-radius: 10px; overflow-x: auto; overflow-y: hidden; border: 1px solid #334155; }
+  .steps-table { width: 100%; border-collapse: collapse; table-layout: auto; }
+  .steps-table thead { background: #162032; }
+  .steps-table th { padding: 12px 10px; text-align: left; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; border-bottom: 1px solid #334155; }
+  .steps-table td { padding: 12px 10px; border-bottom: 1px solid #334155; font-size: 0.82rem; color: #e2e8f0; vertical-align: middle; }
+  .steps-table tbody tr.step-row { cursor: pointer; }
+  .steps-table tbody tr.step-row:hover { background: #252f47; }
+  .steps-table tbody tr.step-row.open { background: #202b40; }
+  .steps-table tbody tr.step-row.non-monotonic { background: rgba(127, 29, 29, 0.45); }
+  .steps-table tbody tr.step-row.non-monotonic:hover { background: rgba(153, 27, 27, 0.6); }
+  .steps-table tbody tr.step-row.non-monotonic.open { background: rgba(127, 29, 29, 0.65); }
+  .steps-table .col-step { width: 70px; }
+  .steps-table .col-model { min-width: 160px; }
+  .steps-table .col-time { min-width: 190px; }
+  .steps-table .col-gap { min-width: 120px; }
+  .steps-table .col-num, .steps-table .col-tools, .steps-table .col-cost { text-align: right; }
+  .steps-table .badge-step { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; height: 32px; padding: 0 8px; border-radius: 6px; background: #334155; color: #e2e8f0; font-weight: 700; }
+  .steps-table .model-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .steps-table .timestamp { color: #94a3b8; font-size: 0.76rem; }
+  .steps-table .gap-value { color: #cbd5e1; font-weight: 600; }
+  .steps-table .gap-value.warn { color: #fbbf24; }
+  .steps-table .gap-alert { color: #fb7185; font-weight: 800; margin-right: 6px; }
+  .steps-table .cost-value { font-weight: 700; color: #ffffff; }
+  .steps-table .tools-count { color: #38bdf8; font-weight: 600; }
+  .step-details { display: none; background: #162032; }
+  .step-details.open { display: table-row; }
+  .step-details td { padding: 16px; }
+  .step-body h3 { font-size: 0.85rem; color: #94a3b8; margin: 12px 0 6px; }
+  @media (max-width: 960px) {
+    .steps-table-wrap { overflow-x: auto; }
+    .steps-table { min-width: 900px; }
+  }
+  .user-block { background: #1a1f2e; border-left: 3px solid #fbbf24; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+  .user-text { background: #0f172a; padding: 8px; border-radius: 4px; font-size: 0.82rem; color: #fde68a; white-space: pre-wrap; word-break: break-word; }
+  .think-block { background: #1a1f2e; border-left: 3px solid #a78bfa; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+  .think-block pre { background: #0f172a; padding: 8px; border-radius: 4px; font-size: 0.75rem; overflow-x: auto; color: #c4b5fd; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+  .resp-block { background: #1a1f2e; border-left: 3px solid #38bdf8; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+  .resp-text { background: #0f172a; padding: 8px; border-radius: 4px; font-size: 0.82rem; color: #e2e8f0; white-space: pre-wrap; word-break: break-word; }
+  .stop-reason { font-size: 0.75rem; color: #64748b; margin-bottom: 10px; }
+  .tool { background: #162032; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+  .tool-name { font-weight: 700; font-size: 0.85rem; color: #38bdf8; margin-bottom: 6px; }
+  .dur-badge { font-weight: 400; font-size: 0.75rem; color: #94a3b8; background: #1e293b; padding: 2px 6px; border-radius: 4px; margin-left: 6px; }
+  .tool pre { background: #0f172a; padding: 8px; border-radius: 4px; font-size: 0.75rem; overflow-x: auto; color: #cbd5e1; margin-bottom: 4px; }
+  .tool .label { font-size: 0.7rem; color: #64748b; margin-bottom: 2px; }
+  .no-tools { color: #64748b; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<div class="page">
+<a href="/">← TokenEKS Dashboard</a>
+<h1 id="title">Session</h1>
+<div class="subtitle" id="subtitle"></div>
+<div class="meta" id="meta"></div>
+<div class="relations" id="relations"></div>
+<div class="stats" id="stats"></div>
+<div style="display:flex;justify-content:flex-end;align-items:center;margin:-4px 0 12px;">
+  <span id="autoRefreshStatus" style="font-size:0.78rem;color:#94a3b8;">Auto-refresh: every 10s</span>
+</div>
+<div class="charts">
+  <div class="chart-container" style="grid-column: 1 / -1;"><h2>Cumulative Tokens &amp; Cost</h2><canvas id="cumChart"></canvas></div>
+</div>
+<div class="charts">
+  <div class="chart-container"><h2>Tokens Per Step</h2><canvas id="stepChart"></canvas></div>
+</div>
+<div class="steps-table-wrap">
+  <table class="steps-table">
+    <thead>
+      <tr>
+        <th class="col-step">Step</th>
+        <th class="col-model">Model</th>
+        <th class="col-time">Timestamp</th>
+        <th class="col-gap">Since prev</th>
+        <th class="col-num">Input</th>
+        <th class="col-num">Output</th>
+        <th class="col-num">Cache Read</th>
+        <th class="col-num">Cache Write</th>
+        <th class="col-tools">Tools</th>
+        <th class="col-cost">Cost</th>
+      </tr>
+    </thead>
+    <tbody id="steps"></tbody>
+  </table>
+</div>
+</div>
+
+<script>
+(async () => {
+const params = new URLSearchParams(window.location.search);
+const agent = params.get('agent');
+const id = params.get('id');
+const autoRefreshStatusEl = document.getElementById('autoRefreshStatus');
+let cumChart = null;
+let stepChart = null;
+let loadInFlight = false;
+let lastLoadedAt = null;
+if (!agent || !id) {
+  document.body.innerHTML += '<p style="color:red">Missing agent or id param</p>';
+  return;
+}
+
+function cumulate(arr) {
+  let sum = 0;
+  return arr.map(v => { sum += v; return sum; });
+}
+
+function formatGap(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '–';
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+async function load() {
+  if (loadInFlight) return;
+  loadInFlight = true;
+  try {
+    const res = await fetch(`/api/session/${encodeURIComponent(agent)}/${encodeURIComponent(id)}`);
+    if (!res.ok) {
+      const text = await res.text();
+      console.error('Failed to load session:', res.status, text);
+      return;
+    }
+    let d;
+    try { d = await res.json(); } catch(e) {
+      console.error('Invalid JSON in detail response', e);
+      return;
+    }
+
+  document.getElementById('title').textContent = `${d.agent} session ${d.id.slice(0,8)}`;
+  document.getElementById('subtitle').textContent = d.title || d.project || '';
+  const meta = document.getElementById('meta');
+  meta.innerHTML = `
+    <span>Agent: ${d.agent}</span>
+    <span>Model: ${d.model || '–'}</span>
+    <span>Date: ${d.date}</span>
+    <span>Duration: ${d.duration || '–'}</span>
+    <span>Steps: ${d.steps.length}</span>
+    <span>Total Cost: $${d.totalCost.toFixed(4)}</span>
+  `;
+
+  const relationsEl = document.getElementById('relations');
+  const relationBlocks = [];
+  if (d.parent) {
+    relationBlocks.push(`
+      <div class="relation-card">
+        <div class="label">Parent session</div>
+        <div class="relation-links">
+          <a class="relation-link" href="/detail?agent=${encodeURIComponent(d.parent.agent)}&id=${encodeURIComponent(d.parent.id)}">
+            <span class="relation-agent">${d.parent.agent}</span>
+            <span>${escHtml(d.parent.title || d.parent.project || d.parent.id)}</span>
+          </a>
+        </div>
+      </div>
+    `);
+  }
+  if (d.children && d.children.length) {
+    relationBlocks.push(`
+      <div class="relation-card">
+        <div class="label">Subsessions (${d.children.length})</div>
+        <table class="children-table">
+          <thead>
+            <tr>
+              <th>Session</th>
+              <th>Model</th>
+              <th class="num">Input</th>
+              <th class="num">Output</th>
+              <th class="num">Cache R</th>
+              <th class="num">Cache W</th>
+              <th class="num">Cache Hit</th>
+              <th class="num">Steps</th>
+              <th class="num">Cost</th>
+              <th class="num">$/1M</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${d.children.map(child => `
+              <tr>
+                <td>
+                  <a class="session-link" href="/detail?agent=${encodeURIComponent(child.agent)}&id=${encodeURIComponent(child.id)}">${escHtml(child.title || child.project || child.id)}</a>
+                </td>
+                <td>${escHtml(child.model || '–')}</td>
+                <td class="num">${(child.totalInput || 0).toLocaleString()}</td>
+                <td class="num">${(child.totalOutput || 0).toLocaleString()}</td>
+                <td class="num">${(child.totalCacheRead || 0).toLocaleString()}</td>
+                <td class="num">${(child.totalCacheWrite || 0).toLocaleString()}</td>
+                <td class="num">${Number.isFinite(child.cacheHitRate) ? child.cacheHitRate.toFixed(1) + '%' : '–'}</td>
+                <td class="num">${(child.steps || 0).toLocaleString()}</td>
+                <td class="num">$${(child.totalCost || 0).toFixed(4)}</td>
+                <td class="num">$${(((child.totalCost || 0) / Math.max((child.totalInput || 0) + (child.totalOutput || 0) + (child.totalCacheRead || 0) + (child.totalCacheWrite || 0), 1)) * 1e6).toFixed(2)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `);
+  }
+  relationsEl.innerHTML = relationBlocks.join('');
+
+  // stats - total and per-model
+  function cacheHitCls(rate) { return rate >= 50 ? 'good' : rate >= 20 ? 'warn' : ''; }
+  function formatMs(ms) { return ms >= 1000 ? (ms/1000).toFixed(1)+'s' : ms+'ms'; }
+  
+  // Build stop reasons string
+  const stopStr = d.stopReasons ? Object.entries(d.stopReasons).map(([k,v]) => k+':'+v).join('\n') : '–';
+  
+  // Tool durations string
+  const toolDurStr = d.toolDurations && d.toolDurations.length 
+    ? d.toolDurations.map(td => td.name+' '+formatMs(td.avgMs)).join('\n')
+    : '–';
+  const totalMeta = { tools: d.totalToolCalls, errors: d.toolErrors, stop: stopStr, toolDurations: toolDurStr };
+  const modelMetaByName = Object.fromEntries((d.modelStats || []).map(ms => [ms.model, {
+    tools: 0,
+    errors: 0,
+    stopCounts: {},
+    toolDurationsRaw: {}
+  }]));
+  for (const step of d.steps || []) {
+    const modelMeta = modelMetaByName[step.model];
+    if (!modelMeta) continue;
+    const stepTools = step.toolCalls || [];
+    modelMeta.tools += stepTools.length;
+    modelMeta.errors += stepTools.filter(tc => tc.error).length;
+    if (step.stopReason) {
+      modelMeta.stopCounts[step.stopReason] = (modelMeta.stopCounts[step.stopReason] || 0) + 1;
+    }
+    for (const tc of stepTools) {
+      if (!tc.durationMs || !tc.name) continue;
+      if (!modelMeta.toolDurationsRaw[tc.name]) modelMeta.toolDurationsRaw[tc.name] = { total: 0, count: 0 };
+      modelMeta.toolDurationsRaw[tc.name].total += tc.durationMs;
+      modelMeta.toolDurationsRaw[tc.name].count += 1;
+    }
+  }
+  
+  const totalCls = cacheHitCls(d.cacheHitRate);
+  const modelRows = (d.modelStats || []).map(ms => {
+    const cls = cacheHitCls(ms.cacheHit);
+    const meta = modelMetaByName[ms.model] || { tools: 0, errors: 0, stopCounts: {}, toolDurationsRaw: {} };
+    const metaStop = Object.keys(meta.stopCounts).length
+      ? Object.entries(meta.stopCounts).map(([name, count]) => `${name}:${count}`).join('\n')
+      : '–';
+    const metaToolDurations = Object.keys(meta.toolDurationsRaw).length
+      ? Object.entries(meta.toolDurationsRaw).map(([name, data]) => `${name} ${formatMs(Math.round(data.total / data.count))}`).join('\n')
+      : '–';
+    return `<tr>
+      <td class="model-name">${ms.model}</td>
+      <td>${ms.input.toLocaleString()}</td>
+      <td>${ms.output.toLocaleString()}</td>
+      <td>${ms.cacheRead.toLocaleString()}</td>
+      <td>${ms.cacheWrite.toLocaleString()}</td>
+      <td><span class="val ${cls}">${ms.cacheHit.toFixed(1)}%</span></td>
+      <td>${ms.steps}</td>
+      <td>$${ms.cost.toFixed(4)}</td>
+    </tr>
+    <tr>
+      <td class="row-label">Tools</td>
+      <td>${meta.tools}</td>
+      <td class="row-label">Errors</td>
+      <td><span class="val ${meta.errors > 0 ? 'bad' : 'good'}">${meta.errors}</span></td>
+      <td class="row-label">Stop</td>
+      <td class="wide-cell">${metaStop}</td>
+      <td class="row-label">Tool durations</td>
+      <td class="wide-cell">${metaToolDurations}</td>
+    </tr>`;
+  }).join('');
+
+  const numModels = (d.modelStats || []).length;
+  const totalRow = numModels <= 1 ? '' : `<tr>
+    <td class="total-name">Total</td>
+    <td>${d.totalInput.toLocaleString()}</td>
+    <td>${d.totalOutput.toLocaleString()}</td>
+    <td>${d.totalCacheRead.toLocaleString()}</td>
+    <td>${d.totalCacheWrite.toLocaleString()}</td>
+    <td><span class="val ${totalCls}">${d.cacheHitRate.toFixed(1)}%</span></td>
+    <td>${d.steps.length}</td>
+    <td>$${d.totalCost.toFixed(4)}</td>
+  </tr>
+  <tr>
+    <td class="row-label">Tools</td>
+    <td>${totalMeta.tools}</td>
+    <td class="row-label">Errors</td>
+    <td><span class="val ${totalMeta.errors > 0 ? 'bad' : 'good'}">${totalMeta.errors}</span></td>
+    <td class="row-label">Stop</td>
+    <td class="wide-cell">${totalMeta.stop}</td>
+    <td class="row-label">Tool durations</td>
+    <td class="wide-cell">${totalMeta.toolDurations}</td>
+  </tr>`;
+
+  document.getElementById('stats').innerHTML = `
+    <div class="stats-grid">
+      <div class="stats-card">
+        <h3>Usage Summary</h3>
+        <table class="stats-table">
+          <tr>
+            <th>Model</th><th>Input</th><th>Output</th><th>Cache R</th><th>Cache W</th><th>Cache Hit</th><th>Steps</th><th>Cost</th>
+          </tr>
+          ${totalRow}
+          ${modelRows}
+        </table>
+      </div>
+    </div>
+  `;
+
+  const labels = d.steps.map(s => 'S' + s.step);
+  const inputAcc = cumulate(d.steps.map(s => s.input));
+  const outputAcc = cumulate(d.steps.map(s => s.output));
+  const crAcc = cumulate(d.steps.map(s => s.cacheRead));
+  const cwAcc = cumulate(d.steps.map(s => s.cacheWrite));
+  const costAcc = cumulate(d.steps.map(s => s.cost));
+
+  if (cumChart) cumChart.destroy();
+  cumChart = new Chart(document.getElementById('cumChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Input', data: inputAcc, borderColor: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.1)', fill: true, tension: 0.3, pointRadius: 2, yAxisID: 'y' },
+        { label: 'Output', data: outputAcc, borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', fill: true, tension: 0.3, pointRadius: 2, yAxisID: 'y' },
+        { label: 'Cache Read', data: crAcc, borderColor: '#94a3b8', backgroundColor: 'rgba(148,163,184,0.1)', fill: true, tension: 0.3, pointRadius: 2, yAxisID: 'y' },
+        { label: 'Cache Write', data: cwAcc, borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.1)', fill: true, tension: 0.3, pointRadius: 2, yAxisID: 'y' },
+        { label: 'Cost', data: costAcc, borderColor: '#ffffff', backgroundColor: 'rgba(255,255,255,0.15)', fill: false, tension: 0.3, pointRadius: 3, pointBackgroundColor:'#ffffff', yAxisID: 'y1', borderDash: [5,5] }
+      ]
+    },
+    options: { responsive:true, maintainAspectRatio:false, scales: { x:{ticks:{color:'#94a3b8'}}, y:{type:'linear',position:'left',ticks:{color:'#94a3b8'}, grid:{color:'#334155'}, title:{display:true,text:'Tokens',color:'#94a3b8'}}, y1:{type:'linear',position:'right',ticks:{color:'#ffffff'}, grid:{drawOnChartArea:false}, title:{display:true,text:'Cost ($)',color:'#ffffff'}} }, plugins:{legend:{position:'bottom',labels:{color:'#cbd5e1'}}} }
+  });
+
+  if (stepChart) stepChart.destroy();
+  stepChart = new Chart(document.getElementById('stepChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Input', data: d.steps.map(s=>s.input), borderColor: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.08)', fill: false, tension: 0.1, pointRadius: 2 },
+        { label: 'Output', data: d.steps.map(s=>s.output), borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.08)', fill: false, tension: 0.1, pointRadius: 2 },
+        { label: 'Cache Read', data: d.steps.map(s=>s.cacheRead), borderColor: '#94a3b8', backgroundColor: 'rgba(148,163,184,0.08)', fill: false, tension: 0.1, pointRadius: 2 },
+        { label: 'Cache Write', data: d.steps.map(s=>s.cacheWrite), borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.08)', fill: false, tension: 0.1, pointRadius: 2 },
+      ]
+    },
+    options: { responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false}, scales: { x:{ticks:{color:'#94a3b8'}}, y:{ticks:{color:'#94a3b8'}, grid:{color:'#334155'}} }, plugins:{legend:{position:'bottom',labels:{color:'#cbd5e1'}}} }
+  });
+
+  // costChart removed — cost is now plotted on the right axis of cumChart
+
+  const stepsEl = document.getElementById('steps');
+  stepsEl.innerHTML = '';
+  let prevTimestamp = null;
+  let prevCacheRead = null;
+  for (const s of d.steps) {
+    const ts = s.timestamp ? s.timestamp.replace('T',' ').replace(/\.\d+Z?/,'') : '';
+    const toolCount = s.toolCalls ? s.toolCalls.length : 0;
+    const currentTimestamp = s.timestamp ? new Date(s.timestamp) : null;
+    const gapMs = prevTimestamp && currentTimestamp ? currentTimestamp - prevTimestamp : NaN;
+    const isGapWarning = Number.isFinite(gapMs) && gapMs >= 5 * 60 * 1000;
+    const gapLabel = prevTimestamp && currentTimestamp ? formatGap(gapMs) : '–';
+    const gapHtml = isGapWarning
+      ? `<span class="gap-value warn"><span class="gap-alert">!</span>${gapLabel}</span>`
+      : `<span class="gap-value">${gapLabel}</span>`;
+    const hasCacheReadDrop = prevCacheRead !== null && s.cacheRead < prevCacheRead;
+
+    const row = document.createElement('tr');
+    row.className = `step-row${hasCacheReadDrop ? ' non-monotonic' : ''}`;
+    row.innerHTML = `
+      <td class="col-step"><span class="badge-step">${s.step}</span></td>
+      <td class="col-model"><span class="model-name">${s.model || '–'}</span></td>
+      <td class="col-time"><span class="timestamp">${ts}</span></td>
+      <td class="col-gap">${gapHtml}</td>
+      <td class="col-num">${s.input.toLocaleString()}</td>
+      <td class="col-num">${s.output.toLocaleString()}</td>
+      <td class="col-num">${s.cacheRead.toLocaleString()}</td>
+      <td class="col-num">${s.cacheWrite.toLocaleString()}</td>
+      <td class="col-tools"><span class="tools-count">${toolCount}</span></td>
+      <td class="col-cost"><span class="cost-value">$${s.cost.toFixed(4)}</span></td>
+    `;
+
+    const detailsRow = document.createElement('tr');
+    detailsRow.className = 'step-details';
+    detailsRow.innerHTML = `
+      <td colspan="10">
+        <div class="step-body">
+          ${s.userPrompt ? '<div class="user-block"><div class="label">User prompt</div><div class="user-text">'+escHtml(s.userPrompt)+'</div></div>' : ''}
+          ${s.thinking ? '<div class="think-block"><div class="label">Thinking</div><pre>'+escHtml(s.thinking)+'</pre></div>' : ''}
+          ${s.response ? '<div class="resp-block"><div class="label">Response</div><div class="resp-text">'+escHtml(s.response)+'</div></div>' : ''}
+          ${s.stopReason ? '<div class="stop-reason">Stop: <strong>'+escHtml(s.stopReason)+'</strong></div>' : ''}
+          ${s.toolCalls && s.toolCalls.length ? renderTools(s.toolCalls) : '<div class="no-tools">No tool calls</div>'}
+        </div>
+      </td>
+    `;
+
+    prevTimestamp = currentTimestamp || prevTimestamp;
+    prevCacheRead = s.cacheRead;
+
+    row.addEventListener('click', () => {
+      row.classList.toggle('open');
+      detailsRow.classList.toggle('open');
+    });
+
+    stepsEl.appendChild(row);
+    stepsEl.appendChild(detailsRow);
+  }
+
+    lastLoadedAt = new Date();
+    if (autoRefreshStatusEl) {
+      autoRefreshStatusEl.textContent = `Auto-refresh: every 10s · last update ${lastLoadedAt.toLocaleTimeString()}`;
+    }
+  } finally {
+    loadInFlight = false;
+  }
+}
+
+function escHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function renderTools(tools) {
+  return tools.map(t => {
+    let inputHtml = '';
+    let outputHtml = '';
+    const pretty = (v) => {
+      if (v == null) return '';
+      if (typeof v === 'string') {
+        try {
+          return `<pre>${JSON.stringify(JSON.parse(v), null, 2)}</pre>`;
+        } catch { return `<pre>${v}</pre>`; }
+      }
+      return `<pre>${JSON.stringify(v, null, 2)}</pre>`;
+    };
+    if (t.input) inputHtml = `<div class="label">Arguments / Input</div>${pretty(t.input)}`;
+    if (t.output) outputHtml = `<div class="label">Result / Output</div>${pretty(t.output)}`;
+    const durBadge = t.durationMs != null ? ' <span class="dur-badge">'+(t.durationMs >= 1000 ? (t.durationMs/1000).toFixed(1)+'s' : t.durationMs+'ms')+'</span>' : '';
+    const errBadge = t.error ? '<span style="color:#f87171;font-weight:700"> ERROR</span>' : '';
+    return `<div class="tool">
+      <div class="tool-name">${t.name}${durBadge}${errBadge}${t.status ? ' <span style="color:#94a3b8;font-weight:400">('+t.status+')</span>' : ''}</div>
+      ${inputHtml}
+      ${outputHtml}
+    </div>`;
+  }).join('');
+}
+
+load();
+setInterval(load, 10 * 1000);
+})();
+</script>
+</body>
+</html>
