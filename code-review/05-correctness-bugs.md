@@ -4,26 +4,25 @@ Behavioural defects: crashes, wrong numbers, inconsistent output.
 
 ---
 
-## C1 — Division by zero → `NaN`/`+Inf` in percentage and per-1M calculations
+## C1 — Division by zero still exists in list/total output paths
 
-**Where:** `opencode.go:243` (`pct := totalOverpay / totalIdeal * 100`), `pi_agent.go:463` (same),
-`main.go:185-186` and `main.go:188` (`/ ocIdeal`, `/ piIdeal`, `/ totalIdeal`)
+**Where:** `opencode.go` totals/footer percentage calculation, `pi_agent.go` totals/footer
+percentage calculation, and `main.go` total report output. The pure summarize helpers already guard
+`PctIdeal`, but some CLI presentation paths still divide by `ideal` totals directly.
 
-**Problem:** These divide by `totalIdeal`/`ocIdeal`/`piIdeal` with no zero-guard. When there is no
-data (or ideal cost is 0), the result is `+Inf` or `NaN`, which then prints as `+Inf%`/`NaN%`.
-Notably `claudeList` *does* guard this (`claude.go:481-483`) — so the behaviour is inconsistent
-between agents.
+**Problem:** This issue is partially fixed. `Summarize` and `SummarizeClaude` already avoid
+`NaN`/`Inf`, but list/total printers still contain direct divisions like `totalOverpay / totalIdeal`
+without always guarding the denominator.
 
-**Why it matters:** Empty histories or filtered-out date ranges produce garbage output instead of
-`0.0%`. Inconsistent handling between `ocList`/`piList` and `claudeList` is a maintenance trap.
+**Why it matters:** Empty histories or filtered-out date ranges can still produce `+Inf%`/`NaN%`
+in CLI output even though the lower-level summarize helpers are safe.
 
-**How to fix:** Guard every division by a token/ideal denominator (`if denom > 0`). Centralize via
-the `perMillion` / percentage helper from [D8](01-duplication.md#d8) so the guard exists in one
-place.
+**How to fix:** Guard every remaining presentation-layer percentage calculation (`if denom > 0`)
+and centralize it in a helper so CLI output and summary structs behave consistently.
 
-**AC (test):** `TestSummarize_NoDivisionByZeroOnEmptyRows` and
-`TestSummarizeClaude_NoDivisionByZeroOnEmptyRows` — pass empty row slices; assert `PctIdeal` is
-`0.0` (not `NaN` or `Inf`). Also assert `printTotal` with zero sessions does not print `NaN%`.
+**AC (test):** Keep `TestSummarize_NoDivisionByZeroOnEmptyRows` and
+`TestSummarizeClaude_NoDivisionByZeroOnEmptyRows`, and add coverage for CLI totals (especially
+`printTotal`) so zero-session output does not print `NaN%`.
 
 ---
 
@@ -69,23 +68,21 @@ in-memory data set; assert the first and last separator lines have equal length.
 
 ---
 
-## C4 — Ignored errors swallow data and hide failures
+## C4 — Silent error handling still hides partial failures and missing data
 
-**Where:** `web.go:48`, `web.go:79`, `web.go:135` (`if err == nil`), `opencode.go:159`,
-`web_detail.go:255`, `web_detail.go:713` (`json.Unmarshal` result ignored), `helpers.go:12`
-(`home, _ := os.UserHomeDir()`)
+**Where:** `web.go` still skips whole agent groups with `if err == nil`, `web_detail.go` and
+`opencode.go` still ignore some `Scan`/`Unmarshal` failures, and `helpers.go` still ignores
+`UserHomeDir` failure in `expandHome`.
 
-**Problem:** Many errors are silently dropped. In `gatherWebSessions`, a failure from any one agent
-(`if err == nil`) silently omits that agent's sessions with no indication. In `expandHome`, a
-`UserHomeDir` error yields an empty home and a wrong path.
+**Problem:** The exact call sites moved slightly, but the behavior is the same: several failures are
+still treated as "just skip it" rather than being surfaced. In the web aggregator this means one
+broken source can quietly disappear from the dashboard.
 
-**Why it matters:** Totals are silently understated; a misconfigured home or unreadable DB just
-makes data vanish from the dashboard/report with no error shown to the user. This undermines the
-trustworthiness of a cost-reporting tool.
+**Why it matters:** Totals can be understated with no visible warning, and debugging missing data is
+hard because the failure path is silent.
 
-**How to fix:** Surface errors (log a warning per failed agent, or return a partial result with an
-`errors` field). At minimum, don't drop them silently. For `expandHome`, propagate or log the
-`UserHomeDir` error.
+**How to fix:** Surface partial errors explicitly (log, collect, or return them alongside partial
+results). At minimum, avoid silently dropping whole agent datasets and ignored path/DB parse errors.
 
 **AC (test):** `TestGatherWebSessions_PartialErrorLogged` — make one agent's loader return an
 error; assert the other agents' sessions are still returned AND the error is surfaced (not silently

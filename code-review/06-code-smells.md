@@ -4,20 +4,21 @@ Smaller issues: dead code, redundancy, naming, magic numbers, style.
 
 ---
 
-## S1 — Dead code
+## S1 — One symbol is dead code, another is orphaned utility code
 
-**Where:** `helpers.go:25-31` (`repeatByte`), `pi_pricing.go:66-71` (`piStepActualCost`)
+**Where:** `helpers.go` contains unused `repeatByte`, and `pi_pricing.go` contains `piStepActualCost`.
 
-**Problem:** `repeatByte` is never called (table separators use `strings.Repeat`).
-`piStepActualCost` is defined but never used — ironically it is exactly the shared cost helper that
-[D15](01-duplication.md#d15) calls for, yet nothing calls it.
+**Problem:** `repeatByte` is dead code. `piStepActualCost` is not dead in the same sense — it has a
+real purpose and tests — but it is still not wired into production callers, so it behaves like an
+orphaned utility instead of a canonical helper.
 
-**How to fix:** Delete `repeatByte`. Wire `piStepActualCost` into the cost-calculation call sites
-(or remove it). Run `go vet`/an unused-symbol linter to catch others.
+**How to fix:** Delete `repeatByte`. Either make `piStepActualCost` the shared production cost
+helper (preferred, see [D15](01-duplication.md#d15)) or remove/rename it if another helper becomes
+canonical.
 
 **AC (test):** After deleting `repeatByte`: `go build ./...` must pass with no undefined-symbol
-errors. For `piStepActualCost`: write `TestStepCost_UsedInSummarize` (see D15), then remove the
-now-redundant function or rename it to the canonical `stepCost`.
+errors. For `piStepActualCost`: keep a test asserting it matches production cost calculations and
+then wire it into real callers or replace it with the canonical helper.
 
 ---
 
@@ -110,17 +111,18 @@ different `HOME` env var and assert it still strips correctly.
 
 ---
 
-## S7 — gofmt violation: mis-indented brace
+## S7 — Repository is not gofmt-clean
 
-**Where:** `pi_agent.go:147` (closing `}` of the dominant-model loop has an extra tab)
+**Where:** Currently `gofmt -l .` reports at least `algo.go`, `pi_agent.go`, `web.go`, and
+`web_detail.go`.
 
-**Problem:** The closing brace at line 147 is indented one level too deep; `gofmt`/`go fmt` would
-reformat it.
+**Problem:** This is no longer just one mis-indented brace. Multiple files are not formatted with
+`gofmt`, which suggests formatting is not enforced consistently.
 
-**Why it matters:** Indicates `gofmt` is not enforced; small but a sign of missing CI formatting
-checks.
+**Why it matters:** It creates noisy diffs, hides real changes in formatting churn, and makes the
+single-file complaint from the original ticket too narrow.
 
-**How to fix:** Run `gofmt -w` and add a format check to CI.
+**How to fix:** Run `gofmt -w` on the repository and add a format check to CI.
 
 **AC (test):** `gofmt -l .` must produce no output (zero files need formatting).
 
@@ -204,18 +206,4 @@ states such as `running`/`pending` (if ever persisted) would be reported as tool
 
 ---
 
-## S12 — Inconsistent closing of resources within one file
-
-**Where:** `opencode.go:160` (`db.Close()` manual) vs `opencode.go:21`/`35`/`85`/`130`
-(`defer ... Close()`)
-
-**Problem:** `ocDetail` closes the DB manually mid-function while the rest of the package uses
-`defer`. The manual close at line 160 means an early `return` between open (154) and close (160)
-would leak the handle.
-
-**How to fix:** Use `defer db.Close()` consistently (and ideally a shared handle per
-[R1](04-resources-and-leaks.md#r1)).
-
-**AC (test):** `go vet ./...` must pass. Grep `opencode.go` for `db.Close()` without a preceding
-`defer` — must return zero matches.
 </content>

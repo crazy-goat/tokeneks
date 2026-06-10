@@ -116,25 +116,6 @@ cache-creation-aware path.
 
 ---
 
-## A6 — `isClaudeModel` hardcodes model IDs while prices are file-configurable
-
-**Where:** `claude.go:142-144` vs `claude.go:42-60`
-
-**Problem:** `initClaudePrices` can load arbitrary models from `~/.tokeneks/claude_models.json`, but
-`isClaudeModel` accepts only the two hardcoded IDs. Any model added via the JSON file is filtered
-out by `claudeMessages` and never appears.
-
-**Why it matters:** Two sources of truth for "which models count as Claude" that can disagree. The
-configurability of the price file is illusory.
-
-**How to fix:** Derive the set of accepted models from the loaded price map (membership test
-against `claudePrices`) instead of a hardcoded `==` check.
-
-**AC (test):** `TestIsClaudeModel_AcceptsModelsFromPriceMap` — add a new model to `claudePrices`
-and assert `isClaudeModel` returns `true` for it without touching the hardcoded list.
-
----
-
 ## A7 — Three different cost sources in the web dashboard
 
 **Where:** `web.go:56` (OC uses `sess.Cost` from DB), `web.go:97` (PI uses `step.Cost` from file),

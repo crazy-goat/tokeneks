@@ -4,30 +4,6 @@ Resource-handling and lifetime problems.
 
 ---
 
-## R1 — A new `*sql.DB` connection pool is opened and closed on every call
-
-**Where:** `opencode.go:16`, `opencode.go:50`, `opencode.go:81`, `opencode.go:154`,
-`web_detail.go:247`
-
-**Problem:** `sql.Open("sqlite3", ...)` returns a `*sql.DB` — a connection pool meant to be
-long-lived and shared. Here a fresh pool is opened (and closed) on every single call, including
-inside loops (`ocSteps` is called once per session from `ocList` and `printTotal` — see
-[P4](03-performance.md#p4)).
-
-**Why it matters:** `*sql.DB` is explicitly designed to be created once and reused; repeated
-open/close churns file descriptors and connection setup, and defeats the built-in pooling. Under a
-loop over many sessions this is wasteful and, on systems with low fd limits, risky.
-
-**How to fix:** Open one `*sql.DB` once (lazily via `sync.Once`, or pass it in) and reuse it across
-all OpenCode queries. Close it once on shutdown. This composes with the [D1](01-duplication.md#d1)
-helper.
-
-**AC (test):** `TestOpenOCDB_ReturnsSameInstance` — call the shared accessor twice and assert
-both return the same pointer. Assert the accessor uses `sync.Once` (or equivalent) so the DB is
-not re-opened.
-
----
-
 ## R2 — Fragile pointer-into-slice pattern in `ocSessionDetail`
 
 **Where:** `web_detail.go:380` (`current = &steps[len(steps)-1]`) used at `web_detail.go:405`

@@ -5,54 +5,6 @@ why it matters, and a suggested fix (without implementation).
 
 ---
 
-## D1 — Repeated SQLite connection boilerplate
-
-**Where:** `opencode.go:15-18`, `opencode.go:49-52`, `opencode.go:80-84`, `opencode.go:153-156`, `web_detail.go:246-251`
-
-**Problem:** The block
-```
-dbPath := expandHome(defaultDB)
-db, err := sql.Open("sqlite3", dbPath)
-if err != nil { ... }
-defer db.Close()
-```
-is duplicated across 5 functions (`ocSteps`, `ocToolCalls`, `ocSessions`, `ocDetail`, `ocSessionDetail`).
-
-**Why it matters:** Any change to how the connection is opened (adding `?_journal_mode`, a busy
-timeout, read-only mode) requires editing 5 places. It is easy to drift (e.g. `ocDetail` closes
-manually via `db.Close()` at line 160, the rest use `defer`).
-
-**How to fix:** Introduce a single helper `openOCDB() (*sql.DB, error)` (or, better, one shared
-long-lived `*sql.DB` — see [R1](04-resources-and-leaks.md#r1)) and use it in all OpenCode
-functions. Unify closing on `defer`.
-
-**AC (test):** Call the new helper twice in a test and assert it returns the same `*sql.DB`
-instance (or that `sql.Open` is not called a second time). All five previously-duplicated call
-sites must be gone from the source.
-
----
-
-## D2 — Nearly identical SQL queries in `ocSessions`
-
-**Where:** `opencode.go:97-124`
-
-**Problem:** The `if date != ""` branch and the `else` branch contain the same ~10-line
-SELECT/JOIN/GROUP BY, differing ONLY in one WHERE condition (`date(...) = ?` vs
-`s.time_created > ...`).
-
-**Why it matters:** Two copies of the same query must be maintained in parallel; changing the
-column list in one branch and forgetting the other produces a mismatch.
-
-**How to fix:** Build the static body of the query as one constant string, and append the
-differentiating WHERE clause and its argument conditionally (e.g. assemble the `args` slice and a
-`whereClause` fragment). One SELECT remains.
-
-**AC (test):** `TestOCSessions_DateAndRangeBranchesUseOneQuery` — mock or inspect the SQL string
-built by both code paths and assert they share the same SELECT/JOIN/GROUP BY skeleton; only the
-WHERE suffix differs.
-
----
-
 ## D3 — `ComputeIdeal` vs `ComputeIdealClaude`
 
 **Where:** `algo.go:264-307` vs `algo.go:72-128`
@@ -120,47 +72,48 @@ call sites must use the same type after the fix.
 
 ---
 
-## D7 — "Dominant model" computation duplicated 3×
+## D7 — Dominant-model selection logic is still duplicated
 
-**Where:** `pi_agent.go:141-147`, `claude.go:212-219`, `claude.go:320-327`
+**Where:** `pi_agent.go` computes `DominantModel` with an inline count/tie-break loop, and Claude
+has the same selection logic repeated in both `claudeSessions` and `claudeDetail`.
 
-**Problem:** The loop "find the model with the most occurrences, break ties lexicographically" is
-written three times.
+**Problem:** The rule "pick the most frequent model, break ties lexicographically" still exists in
+multiple places. The exact locations shifted, but the duplication remains.
 
-**How to fix:** Extract a helper `dominantModel(counts map[string]int) string` and call it in all
-three places.
+**How to fix:** Extract a helper like `dominantModel(counts map[string]int) string` and reuse it in
+PI and Claude flows.
 
 **AC (test):** `TestDominantModel_MostFrequent` and `TestDominantModel_TieBreakLexicographic` —
 call the helper directly; assert it returns the correct model in both cases.
 
 ---
 
-## D8 — Cost-per-1M-tokens computation duplicated
+## D8 — Cost-per-1M-token computation duplicated across row and total output
 
-**Where:** `opencode.go:223-231`, `opencode.go:245-253`, `pi_agent.go:447-455`,
-`pi_agent.go:465-473`, `claude.go:464-472`, `claude.go:485-493`
+**Where:** `opencode.go`, `pi_agent.go`, and `claude.go` each compute per-session and total
+`$/1M`/`i$/1M` values inline.
 
-**Problem:** The pattern `if tokens > 0 { x = cost / float64(tokens) * 1e6 }` for `costPer1M` and
-`idealPer1M` repeats in every list function and again for the totals.
+**Problem:** The same guarded `cost / float64(tokens) * 1e6` pattern is repeated across list rows
+and footer totals. This duplicates both the arithmetic and the zero-token guard.
 
-**How to fix:** A helper `perMillion(cost float64, tokens int) float64` with a built-in
-divide-by-zero guard.
+**How to fix:** Introduce a shared helper such as `perMillion(cost float64, tokens int) float64`
+and use it everywhere these values are rendered.
 
 **AC (test):** `TestPerMillion_ZeroTokens` — assert `perMillion(1.0, 0) == 0.0` (no `NaN`/`Inf`).
 `TestPerMillion_NonZero` — assert `perMillion(1.0, 1_000_000) == 1.0`.
 
 ---
 
-## D9 — `byModel` aggregation + per-model summarize duplicated
+## D9 — Per-model grouping/aggregation is duplicated in CLI and web paths
 
-**Where:** `pi_agent.go:399-430`, `claude.go:407-435`, `web.go:86-111`, `web.go:142-170`
+**Where:** `pi_agent.go` and `claude.go` build `byModel` maps for detail/list calculations, and
+`web.go` independently groups usage by model again for PI and Claude web sessions.
 
-**Problem:** The scheme "group steps by model → compute summary per model → fold into one
-`Summary`" is repeated in four places with minor differences (`Summary` once, `ClaudeSummary` once,
-`WebModelUsage` twice).
+**Problem:** The grouping logic has evolved, but the same "bucket by model, then aggregate per
+bucket" pattern is still repeated in multiple CLI and web code paths.
 
-**How to fix:** A shared `groupByModel(steps) map[string][]StepData` plus one per-model summarize
-function (after merging [D4](#d4)).
+**How to fix:** Extract a shared grouping helper (and, where possible, shared per-model cost/
+summary helpers) so the web and CLI layers stop re-deriving the same aggregates independently.
 
 **AC (test):** `TestGroupByModel_AggregatesCorrectly` — pass a slice of steps with two different
 model names, assert the map has two keys with the correct sub-slices.
@@ -229,20 +182,6 @@ underscore → error (no panic), filename shorter than 10 chars → error (no pa
 
 ---
 
-## D14 — Duplicated `parseTS` closure
-
-**Where:** `web_detail.go:459-464` vs `web_detail.go:630-635`
-
-**Problem:** An identical `parseTS` closure (RFC3339Nano → fallback "2006-01-02 15:04:05") is
-defined twice in `piSessionDetail` and `claudeSessionDetail`.
-
-**How to fix:** One package-level function `parseTimestamp(s string) (time.Time, error)`.
-
-**AC (test):** `TestParseTimestamp` — assert RFC3339Nano input is parsed correctly, and a
-`"2006-01-02 15:04:05"` fallback string is also parsed correctly.
-
----
-
 ## D15 — Cost formula re-implemented in several places
 
 **Where:** `pi_pricing.go:66-71`, `algo.go:196-203`, `web.go:159-162`, `web_detail.go:703-706`
@@ -260,12 +199,14 @@ of steps and assert it equals `Summarize(...).Actual`.
 
 ## D16 — Duplicated title/prompt truncation
 
-**Where:** `pi_agent.go:105-107`, `web_detail.go:337-338`, `web_detail.go:486-490`
+**Where:** `pi_agent.go` truncates the first user prompt for session titles, and `web_detail.go`
+contains the same inline title-truncation pattern in the OpenCode and PI detail builders.
 
-**Problem:** The pattern `if len(t) > 80 { t = t[:77] + "..." }` (and the analogous `> 30`/`> 25`
-for projects) repeats.
+**Problem:** The same `len(...) > 80` / `[:77] + "..."` style truncation logic is still repeated,
+with similar ad-hoc variants elsewhere for project display widths.
 
-**How to fix:** A helper `truncate(s string, max int) string`.
+**How to fix:** Extract a small helper such as `truncate(s string, max int) string` and reuse it
+for title/prompt truncation sites.
 
 **AC (test):** `TestTruncate` — string shorter than max → returned unchanged; string equal to max
 → returned unchanged; string longer than max → truncated with `"..."` suffix and length == max.
