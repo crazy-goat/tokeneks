@@ -1,10 +1,11 @@
 module tokeneks
 
-go 1.25
+go 1.25.0
 
 require (
 	github.com/mattn/go-sqlite3 v1.14.44
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/sys v0.46.0
 )
 
 require (
