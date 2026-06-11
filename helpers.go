@@ -43,13 +43,6 @@ func openOCDB() (*sql.DB, error) {
 	return ocDB, ocDBErr
 }
 
-func max(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 func formatTokens(n int) string {
 	if n >= 1_000_000 {
 		return fmt.Sprintf("%.1fM", float64(n)/1e6)
