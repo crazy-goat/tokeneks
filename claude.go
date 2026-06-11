@@ -493,7 +493,7 @@ func claudeList(days int, date string) error {
 			timestamp, sess.ID, modelShort, project, sess.Msgs, formatTokens(tokens), s.Actual, s.Ideal, s.Overpay, s.PctIdeal, costPer1M, idealPer1M)
 	}
 
-	fmt.Println(strings.Repeat("-", 141))
+	fmt.Println(strings.Repeat("-", 179))
 	totalOverpay := max(totalActual-totalIdeal, 0)
 	pct := float64(0)
 	if totalIdeal > 0 {
