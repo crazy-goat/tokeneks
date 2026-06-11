@@ -56,47 +56,47 @@ type ModelStats struct {
 }
 
 type SessionLink struct {
-	Agent          string  `json:"agent"`
-	ID             string  `json:"id"`
-	Title          string  `json:"title"`
-	Project        string  `json:"project,omitempty"`
-	Model          string  `json:"model,omitempty"`
-	TotalInput     int     `json:"totalInput,omitempty"`
-	TotalOutput    int     `json:"totalOutput,omitempty"`
-	TotalCacheRead int     `json:"totalCacheRead,omitempty"`
-	TotalCacheWrite int    `json:"totalCacheWrite,omitempty"`
-	CacheHitRate   float64 `json:"cacheHitRate,omitempty"`
-	Steps          int     `json:"steps,omitempty"`
-	TotalCost      float64 `json:"totalCost,omitempty"`
+	Agent           string  `json:"agent"`
+	ID              string  `json:"id"`
+	Title           string  `json:"title"`
+	Project         string  `json:"project,omitempty"`
+	Model           string  `json:"model,omitempty"`
+	TotalInput      int     `json:"totalInput,omitempty"`
+	TotalOutput     int     `json:"totalOutput,omitempty"`
+	TotalCacheRead  int     `json:"totalCacheRead,omitempty"`
+	TotalCacheWrite int     `json:"totalCacheWrite,omitempty"`
+	CacheHitRate    float64 `json:"cacheHitRate,omitempty"`
+	Steps           int     `json:"steps,omitempty"`
+	TotalCost       float64 `json:"totalCost,omitempty"`
 }
 
 type SessionDetail struct {
-	Agent     string     `json:"agent"`
-	ID        string     `json:"id"`
-	Title     string     `json:"title"`
-	Project   string     `json:"project"`
-	Model     string     `json:"model"`
-	Date      string     `json:"date"`
-	Duration  string     `json:"duration"`
-	Steps     []StepInfo `json:"steps"`
-	TotalCost float64    `json:"totalCost"`
-	Parent    *SessionLink `json:"parent,omitempty"`
+	Agent     string        `json:"agent"`
+	ID        string        `json:"id"`
+	Title     string        `json:"title"`
+	Project   string        `json:"project"`
+	Model     string        `json:"model"`
+	Date      string        `json:"date"`
+	Duration  string        `json:"duration"`
+	Steps     []StepInfo    `json:"steps"`
+	TotalCost float64       `json:"totalCost"`
+	Parent    *SessionLink  `json:"parent,omitempty"`
 	Children  []SessionLink `json:"children,omitempty"`
 
-	TotalInput       int                `json:"totalInput"`
-	TotalOutput      int                `json:"totalOutput"`
-	TotalCacheRead   int                `json:"totalCacheRead"`
-	TotalCacheWrite  int                `json:"totalCacheWrite"`
-	TotalToolCalls   int                `json:"totalToolCalls"`
-	ToolErrors       int                `json:"toolErrors"`
-	CacheHitRate     float64            `json:"cacheHitRate"`
-	StopReasons      map[string]int     `json:"stopReasons"`
-	AvgThinkingLen   int                `json:"avgThinkingLen"`
-	MaxThinkingLen   int                `json:"maxThinkingLen"`
-	AvgResponseLen   int                `json:"avgResponseLen"`
-	MaxResponseLen   int                `json:"maxResponseLen"`
-	ToolDurations    []ToolDurationStat `json:"toolDurations,omitempty"`
-	ModelStats       []ModelStats       `json:"modelStats,omitempty"`
+	TotalInput      int                `json:"totalInput"`
+	TotalOutput     int                `json:"totalOutput"`
+	TotalCacheRead  int                `json:"totalCacheRead"`
+	TotalCacheWrite int                `json:"totalCacheWrite"`
+	TotalToolCalls  int                `json:"totalToolCalls"`
+	ToolErrors      int                `json:"toolErrors"`
+	CacheHitRate    float64            `json:"cacheHitRate"`
+	StopReasons     map[string]int     `json:"stopReasons"`
+	AvgThinkingLen  int                `json:"avgThinkingLen"`
+	MaxThinkingLen  int                `json:"maxThinkingLen"`
+	AvgResponseLen  int                `json:"avgResponseLen"`
+	MaxResponseLen  int                `json:"maxResponseLen"`
+	ToolDurations   []ToolDurationStat `json:"toolDurations,omitempty"`
+	ModelStats      []ModelStats       `json:"modelStats,omitempty"`
 }
 
 func fillSessionStats(d *SessionDetail) {
@@ -316,7 +316,9 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 	_ = db.QueryRow("SELECT title, model, time_created, ifnull(parent_id, '') FROM session WHERE id = ?", sessionID).Scan(&title, &modelRaw, &createdAt, &parentID)
 	modelName := ""
 	if modelRaw != "" {
-		var m struct{ ID string `json:"id"` }
+		var m struct {
+			ID string `json:"id"`
+		}
 		if err := json.Unmarshal([]byte(modelRaw), &m); err == nil {
 			modelName = m.ID
 		}
@@ -349,11 +351,11 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 	var lastUserPrompt string
 
 	type ocPart struct {
-		Type   string  `json:"type"`
-		Text   string  `json:"text"`
-		Reason string  `json:"reason"`
-		Tool   string  `json:"tool"`
-		CallID string  `json:"callID"`
+		Type   string `json:"type"`
+		Text   string `json:"text"`
+		Reason string `json:"reason"`
+		Tool   string `json:"tool"`
+		CallID string `json:"callID"`
 		State  struct {
 			Status string          `json:"status"`
 			Input  json.RawMessage `json:"input"`
@@ -368,8 +370,8 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 				Write int `json:"write"`
 			} `json:"cache"`
 		} `json:"tokens"`
-		Cost  float64 `json:"cost"`
-		Time  struct {
+		Cost float64 `json:"cost"`
+		Time struct {
 			Start int64 `json:"start"`
 			End   int64 `json:"end"`
 		} `json:"time"`
@@ -396,7 +398,11 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 			if role == "user" {
 				lastUserPrompt = t
 				if title == "" {
-					if len(t) > 80 { title = t[:77] + "..." } else { title = t }
+					if len(t) > 80 {
+						title = t[:77] + "..."
+					} else {
+						title = t
+					}
 				}
 			} else {
 				if pendingText != "" {
@@ -421,18 +427,18 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 				stopReason = "toolUse"
 			}
 			s := StepInfo{
-				Step:        len(steps) + 1,
-				Timestamp:   time.Unix(ts/1000, (ts%1000)*1e6).UTC().Format(time.RFC3339),
-				Model:       modelName,
-				Input:       part.Tokens.Input,
-				Output:      part.Tokens.Output,
-				CacheRead:   part.Tokens.Cache.Read,
-				CacheWrite:  part.Tokens.Cache.Write,
-				Cost:        part.Cost,
-				Thinking:    pendingThinking,
-				Response:    pendingText,
-				StopReason:  stopReason,
-				UserPrompt:  lastUserPrompt,
+				Step:       len(steps) + 1,
+				Timestamp:  time.Unix(ts/1000, (ts%1000)*1e6).UTC().Format(time.RFC3339),
+				Model:      modelName,
+				Input:      part.Tokens.Input,
+				Output:     part.Tokens.Output,
+				CacheRead:  part.Tokens.Cache.Read,
+				CacheWrite: part.Tokens.Cache.Write,
+				Cost:       part.Cost,
+				Thinking:   pendingThinking,
+				Response:   pendingText,
+				StopReason: stopReason,
+				UserPrompt: lastUserPrompt,
 			}
 			lastUserPrompt = ""
 			pendingText = ""
@@ -518,23 +524,23 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 		Type      string `json:"type"`
 		Timestamp string `json:"timestamp"`
 		Message   struct {
-			Role       string `json:"role"`
-			Provider   string `json:"provider"`
-			Model      string `json:"model"`
-			Usage      piUsage `json:"usage"`
-			Content    []struct {
-				Type               string          `json:"type"`
-				Text               string          `json:"text"`
-				Thinking           string          `json:"thinking"`
-				ThinkingSignature  string          `json:"thinkingSignature"`
-				Name               string          `json:"name"`
-				Arguments          json.RawMessage `json:"arguments"`
-				ID                 string          `json:"id"`
+			Role     string  `json:"role"`
+			Provider string  `json:"provider"`
+			Model    string  `json:"model"`
+			Usage    piUsage `json:"usage"`
+			Content  []struct {
+				Type              string          `json:"type"`
+				Text              string          `json:"text"`
+				Thinking          string          `json:"thinking"`
+				ThinkingSignature string          `json:"thinkingSignature"`
+				Name              string          `json:"name"`
+				Arguments         json.RawMessage `json:"arguments"`
+				ID                string          `json:"id"`
 			} `json:"content"`
-			StopReason   string `json:"stopReason"`
-			ToolCallID   string `json:"toolCallId"`
-			ToolName     string `json:"toolName"`
-			IsError      bool   `json:"isError"`
+			StopReason string `json:"stopReason"`
+			ToolCallID string `json:"toolCallId"`
+			ToolName   string `json:"toolName"`
+			IsError    bool   `json:"isError"`
 		} `json:"message"`
 	}
 
@@ -618,16 +624,16 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 		assTS, _ := parseTS(entry.Timestamp)
 
 		s := StepInfo{
-			Step:        len(steps) + 1,
-			Timestamp:   entry.Timestamp,
-			Model:       entry.Message.Model,
-			Input:       entry.Message.Usage.Input,
-			Output:      entry.Message.Usage.Output,
-			CacheRead:   entry.Message.Usage.CacheRead,
-			CacheWrite:  entry.Message.Usage.CacheWrite,
-			Cost:        entry.Message.Usage.Cost.Total,
-			StopReason:  entry.Message.StopReason,
-			UserPrompt:  lastUserPrompt,
+			Step:       len(steps) + 1,
+			Timestamp:  entry.Timestamp,
+			Model:      entry.Message.Model,
+			Input:      entry.Message.Usage.Input,
+			Output:     entry.Message.Usage.Output,
+			CacheRead:  entry.Message.Usage.CacheRead,
+			CacheWrite: entry.Message.Usage.CacheWrite,
+			Cost:       entry.Message.Usage.Cost.Total,
+			StopReason: entry.Message.StopReason,
+			UserPrompt: lastUserPrompt,
 		}
 		lastUserPrompt = "" // consumed
 		// extract thinking, text and tool calls from assistant message content
@@ -726,10 +732,10 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 	defer f.Close()
 
 	type claudeContentItem struct {
-		Type string          `json:"type"`
-		Text string          `json:"text"`
-		Name string          `json:"name"`
-		ID   string          `json:"id"`
+		Type  string          `json:"type"`
+		Text  string          `json:"text"`
+		Name  string          `json:"name"`
+		ID    string          `json:"id"`
 		Input json.RawMessage `json:"input"`
 	}
 

@@ -44,15 +44,15 @@ type StepData struct {
 
 // ClaudeIdealRow extends IdealRow with CacheCreation fields
 type ClaudeIdealRow struct {
-	Input          int
-	CacheCreation  int
-	CacheRead      int
-	Output         int
-	IdealCR        int
-	IdealCC        int
-	IdealIn        int
-	Waste          int
-	IsCompact      bool
+	Input         int
+	CacheCreation int
+	CacheRead     int
+	Output        int
+	IdealCR       int
+	IdealCC       int
+	IdealIn       int
+	Waste         int
+	IsCompact     bool
 }
 
 func (r ClaudeIdealRow) Note() string {
@@ -113,15 +113,15 @@ func ComputeIdealClaude(steps []StepData, prices ModelPrices) []ClaudeIdealRow {
 		}
 
 		rows[i] = ClaudeIdealRow{
-			Input:          s.Input,
-			CacheCreation:  s.CacheCreation,
-			CacheRead:      s.CacheRead,
-			Output:         s.Output,
-			IdealCR:        idealCR,
-			IdealCC:        idealCC,
-			IdealIn:        idealIn,
-			Waste:          waste,
-			IsCompact:      isCompact,
+			Input:         s.Input,
+			CacheCreation: s.CacheCreation,
+			CacheRead:     s.CacheRead,
+			Output:        s.Output,
+			IdealCR:       idealCR,
+			IdealCC:       idealCC,
+			IdealIn:       idealIn,
+			Waste:         waste,
+			IsCompact:     isCompact,
 		}
 
 		// Update idealCR for next step: current cache + new CC + output

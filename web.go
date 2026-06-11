@@ -52,13 +52,13 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 	if err == nil {
 		for _, sess := range ocSess {
 			usage := WebModelUsage{
-				Model:    sess.Model,
-				Provider: sess.Provider,
-				Input:    sess.TokensInput,
+				Model:     sess.Model,
+				Provider:  sess.Provider,
+				Input:     sess.TokensInput,
 				CacheRead: sess.TokensCacheRead,
-				Output:   sess.TokensOutput,
-				Messages: sess.Steps,
-				Cost:     sess.Cost,
+				Output:    sess.TokensOutput,
+				Messages:  sess.Steps,
+				Cost:      sess.Cost,
 			}
 			toolCalls, _ := ocToolCalls(sess.ID)
 			lastAt := time.Unix(sess.LastActivity/1000, 0).UTC().Format("2006-01-02 15:04:05")

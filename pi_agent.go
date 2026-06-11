@@ -14,12 +14,12 @@ import (
 const defaultPISessions = "~/.pi/agent/sessions"
 
 type piUsage struct {
-	Input      int     `json:"input"`
-	CacheRead  int     `json:"cacheRead"`
-	CacheWrite int     `json:"cacheWrite"`
-	Output     int     `json:"output"`
-	Total      int     `json:"totalTokens"`
-	Cost       piCost  `json:"cost"`
+	Input      int    `json:"input"`
+	CacheRead  int    `json:"cacheRead"`
+	CacheWrite int    `json:"cacheWrite"`
+	Output     int    `json:"output"`
+	Total      int    `json:"totalTokens"`
+	Cost       piCost `json:"cost"`
 }
 
 type piCost struct {
@@ -149,7 +149,7 @@ func piSessionUsage(fp string) (piSessionData, error) {
 			maxCount = count
 			data.DominantModel = model
 		}
-		}
+	}
 
 	return data, scanner.Err()
 }
