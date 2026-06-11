@@ -841,10 +841,7 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 		idx, exists := msgIndexByID[msg.Message.ID]
 		if !exists {
 			prices := claudeGlobalModelPrices()[msg.Message.Model]
-			cost := float64(u.InputTokens)*prices.Input/tokensPerMillion +
-				float64(u.CacheCreationInputTokens)*prices.CacheCreation/tokensPerMillion +
-				float64(u.CacheReadInputTokens)*prices.CacheRead/tokensPerMillion +
-				float64(u.OutputTokens)*prices.Output/tokensPerMillion
+			cost := piStepActualCost(StepData{Input: u.InputTokens, CacheCreation: u.CacheCreationInputTokens, CacheRead: u.CacheReadInputTokens, Output: u.OutputTokens}, prices)
 			steps = append(steps, StepInfo{
 				Step:       len(steps) + 1,
 				Timestamp:  msg.Timestamp,

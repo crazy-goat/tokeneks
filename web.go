@@ -239,10 +239,7 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 			var totalCost float64
 			for _, u := range byModel {
 				prices := claudeGlobalModelPrices()[u.Model]
-				u.Cost = float64(u.Input)*prices.Input/tokensPerMillion +
-					float64(u.CacheWrite)*prices.CacheCreation/tokensPerMillion +
-					float64(u.CacheRead)*prices.CacheRead/tokensPerMillion +
-					float64(u.Output)*prices.Output/tokensPerMillion
+				u.Cost = piStepActualCost(StepData{Input: u.Input, CacheCreation: u.CacheWrite, CacheRead: u.CacheRead, Output: u.Output}, prices)
 				totalCost += u.Cost
 				totalInput += u.Input
 				totalPromptInput += u.Input + u.CacheWrite
