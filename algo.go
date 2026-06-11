@@ -42,8 +42,8 @@ type StepData struct {
 	Output        int
 }
 
-// ClaudeIdealRow extends IdealRow with CacheCreation fields
-type ClaudeIdealRow struct {
+// IdealRow holds computed ideal values per step.
+type IdealRow struct {
 	Input         int
 	CacheCreation int
 	CacheRead     int
@@ -55,11 +55,11 @@ type ClaudeIdealRow struct {
 	IsCompact     bool
 }
 
-func (r ClaudeIdealRow) Note() string {
+func (r IdealRow) Note() string {
 	if r.IsCompact {
 		return "COMPACT"
 	}
-	if r.Waste == 0 && r.IdealCC == 0 {
+	if r.Waste == 0 {
 		return "HIT"
 	}
 	if r.CacheRead > 1000 {
@@ -68,7 +68,57 @@ func (r ClaudeIdealRow) Note() string {
 	return "MISS"
 }
 
-// ComputeIdealClaude calculates ideal cache_read for Claude with cache_creation support
+// Backwards-compatible aliases for existing call sites.
+type ClaudeIdealRow = IdealRow
+
+type ClaudeSummary = Summary
+
+// Summary holds aggregated totals.
+type Summary struct {
+	TotalCC      int
+	TotalCR      int
+	TotalIn      int
+	TotalOut     int
+	TotalIdealCR int
+	TotalIdealCC int
+	TotalIdealIn int
+	TotalWaste   int
+	Actual       float64
+	Ideal        float64
+	Overpay      float64
+	PctIdeal     float64
+}
+
+func Summarize(rows []IdealRow, prices ModelPrices) Summary {
+	var s Summary
+	for _, r := range rows {
+		s.TotalCC += r.CacheCreation
+		s.TotalCR += r.CacheRead
+		s.TotalIn += r.Input
+		s.TotalOut += r.Output
+		s.TotalIdealCR += r.IdealCR
+		s.TotalIdealCC += r.IdealCC
+		s.TotalIdealIn += r.IdealIn
+		s.TotalWaste += r.Waste
+	}
+	step := StepData{Input: s.TotalIn, CacheCreation: s.TotalCC, CacheRead: s.TotalCR, Output: s.TotalOut}
+	idealStep := StepData{Input: s.TotalIdealIn, CacheCreation: s.TotalIdealCC, CacheRead: s.TotalIdealCR, Output: s.TotalOut}
+	s.Actual = piStepActualCost(step, prices)
+	s.Ideal = piStepActualCost(idealStep, prices)
+	s.Overpay = s.Actual - s.Ideal
+	if s.Overpay < 0 {
+		s.Overpay = 0
+	}
+	if s.Ideal > 0 {
+		s.PctIdeal = s.Overpay / s.Ideal * 100
+	}
+	return s
+}
+
+func SummarizeClaude(rows []ClaudeIdealRow, prices ModelPrices) ClaudeSummary {
+	return Summarize(rows, prices)
+}
+
 func ComputeIdealClaude(steps []StepData, prices ModelPrices) []ClaudeIdealRow {
 	idealCR := 0
 	rows := make([]ClaudeIdealRow, len(steps))
@@ -112,7 +162,7 @@ func ComputeIdealClaude(steps []StepData, prices ModelPrices) []ClaudeIdealRow {
 			waste = 0
 		}
 
-		rows[i] = ClaudeIdealRow{
+		rows[i] = IdealRow{
 			Input:         s.Input,
 			CacheCreation: s.CacheCreation,
 			CacheRead:     s.CacheRead,
@@ -124,118 +174,13 @@ func ComputeIdealClaude(steps []StepData, prices ModelPrices) []ClaudeIdealRow {
 			IsCompact:     isCompact,
 		}
 
-		// Update idealCR for next step: current cache + new CC + output
 		idealCR = idealCR + idealCC + s.Output
 	}
 
 	return rows
 }
 
-// ClaudeSummary extends Summary with CacheCreation
-type ClaudeSummary struct {
-	TotalCC      int
-	TotalCR      int
-	TotalIn      int
-	TotalOut     int
-	TotalIdealCR int
-	TotalIdealCC int
-	TotalIdealIn int
-	TotalWaste   int
-	Actual       float64
-	Ideal        float64
-	Overpay      float64
-	PctIdeal     float64
-}
-
-// IdealRow holds computed ideal values per step (original for Kimi)
-type IdealRow struct {
-	Input     int
-	CacheRead int
-	Output    int
-	IdealIn   int
-	IdealCR   int
-	Waste     int
-	IsCompact bool
-}
-
-func (r IdealRow) Note() string {
-	if r.IsCompact {
-		return "COMPACT"
-	}
-	if r.Waste == 0 {
-		return "HIT"
-	}
-	if r.CacheRead > 1000 {
-		return "PARTIAL"
-	}
-	return "MISS"
-}
-
-// Summary holds aggregated totals (original for Kimi)
-type Summary struct {
-	TotalCR      int
-	TotalIn      int
-	TotalOut     int
-	TotalIdealCR int
-	TotalIdealIn int
-	TotalWaste   int
-	Actual       float64
-	Ideal        float64
-	Overpay      float64
-	PctIdeal     float64
-}
-
-func SummarizeClaude(rows []ClaudeIdealRow, prices ModelPrices) ClaudeSummary {
-	var s ClaudeSummary
-	for _, r := range rows {
-		s.TotalCC += r.CacheCreation
-		s.TotalCR += r.CacheRead
-		s.TotalIn += r.Input
-		s.TotalOut += r.Output
-		s.TotalIdealCR += r.IdealCR
-		s.TotalIdealCC += r.IdealCC
-		s.TotalIdealIn += r.IdealIn
-		s.TotalWaste += r.Waste
-	}
-	step := StepData{Input: s.TotalIn, CacheCreation: s.TotalCC, CacheRead: s.TotalCR, Output: s.TotalOut}
-	idealStep := StepData{Input: s.TotalIdealIn, CacheCreation: s.TotalIdealCC, CacheRead: s.TotalIdealCR, Output: s.TotalOut}
-	s.Actual = piStepActualCost(step, prices)
-	s.Ideal = piStepActualCost(idealStep, prices)
-	s.Overpay = s.Actual - s.Ideal
-	if s.Overpay < 0 {
-		s.Overpay = 0
-	}
-	if s.Ideal > 0 {
-		s.PctIdeal = s.Overpay / s.Ideal * 100
-	}
-	return s
-}
-
-func Summarize(rows []IdealRow, prices ModelPrices) Summary {
-	var s Summary
-	for _, r := range rows {
-		s.TotalCR += r.CacheRead
-		s.TotalIn += r.Input
-		s.TotalOut += r.Output
-		s.TotalIdealCR += r.IdealCR
-		s.TotalIdealIn += r.IdealIn
-		s.TotalWaste += r.Waste
-	}
-	step := StepData{Input: s.TotalIn, CacheRead: s.TotalCR, Output: s.TotalOut}
-	idealStep := StepData{Input: s.TotalIdealIn, CacheRead: s.TotalIdealCR, Output: s.TotalOut}
-	s.Actual = piStepActualCost(step, prices)
-	s.Ideal = piStepActualCost(idealStep, prices)
-	s.Overpay = s.Actual - s.Ideal
-	if s.Overpay < 0 {
-		s.Overpay = 0
-	}
-	if s.Ideal > 0 {
-		s.PctIdeal = s.Overpay / s.Ideal * 100
-	}
-	return s
-}
-
-func printDetailRowsClaude(rows []ClaudeIdealRow, prices ModelPrices) {
+func printDetailRowsClaude(rows []IdealRow, prices ModelPrices) {
 	fmt.Printf("%4s  %7s  %7s  %7s  %6s  │  %8s  %8s  %6s  │  %7s  %8s\n",
 		"Step", "c.read", "c.write", "input", "output", "i_cr", "i_cc", "out", "waste", "note")
 	fmt.Println(strings.Repeat("-", 99))
@@ -298,13 +243,15 @@ func ComputeIdeal(steps []StepData) []IdealRow {
 		}
 
 		rows[i] = IdealRow{
-			Input:     s.Input,
-			CacheRead: s.CacheRead,
-			Output:    s.Output,
-			IdealIn:   idealIn,
-			IdealCR:   idealCR,
-			Waste:     waste,
-			IsCompact: isCompact,
+			Input:         s.Input,
+			CacheCreation: s.CacheCreation,
+			CacheRead:     s.CacheRead,
+			Output:        s.Output,
+			IdealIn:       idealIn,
+			IdealCR:       idealCR,
+			IdealCC:       0,
+			Waste:         waste,
+			IsCompact:     isCompact,
 		}
 
 		idealCR = idealCR + s.Output
