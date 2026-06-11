@@ -14,6 +14,9 @@ import (
 //go:embed web/index.html
 var webIndexHTML []byte
 
+//go:embed web/chart.umd.min.js
+var chartJS []byte
+
 type WebModelUsage struct {
 	Model      string  `json:"model"`
 	Provider   string  `json:"provider"`
@@ -390,6 +393,12 @@ func runWeb(port string, days int) error {
 	mux.HandleFunc("/detail", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(webDetailHTML)
+	})
+
+	mux.HandleFunc("/static/chart.umd.min.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(chartJS)
 	})
 
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
