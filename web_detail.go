@@ -455,18 +455,18 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 					out = json.RawMessage(b)
 				}
 				status := part.State.Status
-				isErr := status != "completed" && status != ""
-				var input json.RawMessage
-				if len(part.State.Input) > 0 {
-					input = part.State.Input
-				}
-				tc := ToolCallInfo{
-					Name:   part.Tool,
-					Input:  input,
-					Output: out,
-					Error:  isErr,
-					Status: status,
-				}
+			isErr := toolCallIsError(status)
+			var input json.RawMessage
+			if len(part.State.Input) > 0 {
+				input = part.State.Input
+			}
+			tc := ToolCallInfo{
+				Name:   part.Tool,
+				Input:  input,
+				Output: out,
+				Error:  isErr,
+				Status: status,
+			}
 				// tool duration from time.start/time.end if available
 				if part.Time.Start > 0 && part.Time.End > 0 {
 					tc.DurationMs = (part.Time.End - part.Time.Start) / 1e6

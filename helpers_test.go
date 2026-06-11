@@ -158,7 +158,6 @@ func TestFileDateFromFilename(t *testing.T) {
 	}{
 		{"2025-01-15_abc123.jsonl", "2025-01-15", true},
 		{"short.jsonl", "", false},
-		{"2025-01-15_abc123.jsonl", "2025-01-15", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,5 +169,25 @@ func TestFileDateFromFilename(t *testing.T) {
 				t.Errorf("fileDateFromFilename(%q) = %q, want %q", tc.name, got, tc.date)
 			}
 		})
+	}
+}
+
+func TestToolCallIsError_KnownStatuses(t *testing.T) {
+	tests := []struct {
+		status string
+		want   bool
+	}{
+		{"error", true},
+		{"failed", true},
+		{"completed", false},
+		{"running", false},
+		{"pending", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		got := toolCallIsError(tc.status)
+		if got != tc.want {
+			t.Errorf("toolCallIsError(%q) = %v, want %v", tc.status, got, tc.want)
+		}
 	}
 }

@@ -78,6 +78,12 @@ func fileDateFromFilename(name string) (string, bool) {
 	return base[:10], true
 }
 
+// toolCallIsError determines if a tool call status indicates an error.
+// Only explicit error/failed statuses are errors; transient or empty statuses are not.
+func toolCallIsError(status string) bool {
+	return status == "error" || status == "failed"
+}
+
 func formatTokens(n int) string {
 	if n >= 1_000_000 {
 		return fmt.Sprintf("%.1fM", float64(n)/1e6)
