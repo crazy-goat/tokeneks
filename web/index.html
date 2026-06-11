@@ -170,6 +170,16 @@ class MultiSelect {
       lbl.appendChild(document.createTextNode(opt));
       this.panel.appendChild(lbl);
     }
+    this.selected = new Set([...this.selected].filter((opt) => options.includes(opt)));
+    this._updateLabel();
+  }
+  setSelectedValues(values) {
+    const available = new Set([...this.panel.querySelectorAll('input[type="checkbox"]')].map(cb => cb.value));
+    const nextValues = Array.isArray(values) ? values : [];
+    this.selected = new Set(nextValues.filter((value) => available.has(value)));
+    this.panel.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.checked = this.selected.has(cb.value);
+    });
     this._updateLabel();
   }
   getValues() {
@@ -196,6 +206,57 @@ let sortCol = 'date';
 let sortDir = -1;
 
 let filterAgent, filterProvider, filterModel;
+
+const filterStateKey = 'tokeneks.dashboardFilters';
+let pendingFilterState = null;
+
+function readFilterState() {
+  try {
+    const raw = sessionStorage.getItem(filterStateKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveFilterState() {
+  try {
+    const savedAgent = filterAgent?.getValues() ?? pendingFilterState?.agent ?? [];
+    const savedProvider = filterProvider?.getValues() ?? pendingFilterState?.provider ?? [];
+    const savedModel = filterModel?.getValues() ?? pendingFilterState?.model ?? [];
+    sessionStorage.setItem(filterStateKey, JSON.stringify({
+      quickRange: document.getElementById('quickRange').value,
+      startDate: document.getElementById('startDate').value,
+      endDate: document.getElementById('endDate').value,
+      hideSubsessions: document.getElementById('hideSubsessions').checked,
+      agent: savedAgent,
+      provider: savedProvider,
+      model: savedModel,
+    }));
+  } catch {
+  }
+}
+
+function restoreDateState(state) {
+  const quickRangeEl = document.getElementById('quickRange');
+  const startDateEl = document.getElementById('startDate');
+  const endDateEl = document.getElementById('endDate');
+  if (!state) {
+    applyQuickRange('last7');
+    return;
+  }
+  quickRangeEl.value = state.quickRange || 'last7';
+  if (quickRangeEl.value === 'custom') {
+    startDateEl.value = state.startDate || '';
+    endDateEl.value = state.endDate || '';
+  } else {
+    applyQuickRange(quickRangeEl.value);
+  }
+  document.getElementById('hideSubsessions').checked = state.hideSubsessions === undefined ? true : state.hideSubsessions === true;
+  pendingFilterState = state;
+}
 
 function formatDateInput(d) {
   const y = d.getFullYear();
@@ -308,6 +369,13 @@ function populateFilters() {
   filterAgent.setOptions(agents);
   filterProvider.setOptions(providers);
   filterModel.setOptions(models);
+
+  if (pendingFilterState) {
+    filterAgent.setSelectedValues(pendingFilterState.agent);
+    filterProvider.setSelectedValues(pendingFilterState.provider);
+    filterModel.setSelectedValues(pendingFilterState.model);
+    pendingFilterState = null;
+  }
 }
 
 function renderTable() {
@@ -512,7 +580,7 @@ async function loadData() {
   }));
 
   const top = [...allSessions].sort((a,b)=>b.totalCost - a.totalCost).slice(0,12);
-  const chart = new Chart(document.getElementById('sessionCostChart'), {
+  charts.push(new Chart(document.getElementById('sessionCostChart'), {
     type: 'bar',
     data: {
       labels: top.map(s => s.agent + ' ' + s.id.slice(0,8)),
@@ -533,7 +601,7 @@ async function loadData() {
         e.native.target.style.cursor = elements.length > 0 ? 'pointer' : '';
       }
     }
-  });
+  }));
 
   const canvas = document.getElementById('sessionCostChart');
   canvas.onclick = function(evt) {
@@ -578,9 +646,9 @@ async function loadData() {
 }
 
 // init multi-select filters
-filterAgent = new MultiSelect(document.getElementById('filterAgent'), 'All', renderTable);
-filterProvider = new MultiSelect(document.getElementById('filterProvider'), 'All', renderTable);
-filterModel = new MultiSelect(document.getElementById('filterModel'), 'All', renderTable);
+filterAgent = new MultiSelect(document.getElementById('filterAgent'), 'All', () => { saveFilterState(); renderTable(); });
+filterProvider = new MultiSelect(document.getElementById('filterProvider'), 'All', () => { saveFilterState(); renderTable(); });
+filterModel = new MultiSelect(document.getElementById('filterModel'), 'All', () => { saveFilterState(); renderTable(); });
 
 // sort headers
 document.querySelectorAll('th.sortable').forEach(th => {
@@ -593,20 +661,26 @@ document.querySelectorAll('th.sortable').forEach(th => {
 });
 
 document.getElementById('reloadBtn').addEventListener('click', loadData);
-document.getElementById('hideSubsessions').addEventListener('change', renderTable);
+document.getElementById('hideSubsessions').addEventListener('change', () => {
+  saveFilterState();
+  renderTable();
+});
 document.getElementById('quickRange').addEventListener('change', (e) => {
   applyQuickRange(e.target.value);
+  saveFilterState();
   loadData();
 });
 document.getElementById('startDate').addEventListener('change', () => {
   document.getElementById('quickRange').value = 'custom';
+  saveFilterState();
   loadData();
 });
 document.getElementById('endDate').addEventListener('change', () => {
   document.getElementById('quickRange').value = 'custom';
+  saveFilterState();
   loadData();
 });
-applyQuickRange('last7');
+restoreDateState(readFilterState());
 loadData();
 setInterval(loadData, 5 * 60 * 1000);
 </script>
