@@ -95,7 +95,7 @@ func TestSummarize_EquivalentToClaudeWhenNoCacheCreation(t *testing.T) {
 }
 
 // S4: IdealIn is always 0 in ComputeIdealClaude — documents this as a known structural issue
-func TestComputeIdealClaude_IdealInIsAlwaysZero(t *testing.T) {
+func TestComputeIdealClaude_IdealInRemoved(t *testing.T) {
 	steps := []StepData{
 		{Input: 500, CacheCreation: 500, CacheRead: 0, Output: 100},
 		{Input: 100, CacheCreation: 100, CacheRead: 500, Output: 100},
@@ -103,9 +103,14 @@ func TestComputeIdealClaude_IdealInIsAlwaysZero(t *testing.T) {
 	}
 	prices := ModelPrices{Input: 5.5, CacheCreation: 6.75, CacheRead: 0.55, Output: 27.5}
 	rows := ComputeIdealClaude(steps, prices)
+	// IdealIn was always 0 for Claude; it has been removed from ClaudeIdealRow.
+	// Verify that the output format still works correctly (no panic, sensible values).
+	if len(rows) != len(steps) {
+		t.Fatalf("expected %d rows, got %d", len(steps), len(rows))
+	}
 	for i, r := range rows {
-		if r.IdealIn != 0 {
-			t.Errorf("step %d: IdealIn=%d, expected 0 (field is structurally always zero)", i, r.IdealIn)
+		if r.IdealCR < 0 {
+			t.Errorf("step %d: IdealCR=%d, expected >= 0", i, r.IdealCR)
 		}
 	}
 }

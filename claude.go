@@ -448,9 +448,9 @@ func claudeList(days int, date string) error {
 			s.TotalIn += part.TotalIn
 			s.TotalOut += part.TotalOut
 			s.TotalIdealCR += part.TotalIdealCR
+		s.TotalIdealIn += part.TotalIdealIn
 			s.TotalIdealCC += part.TotalIdealCC
-			s.TotalIdealIn += part.TotalIdealIn
-			s.TotalWaste += part.TotalWaste
+						s.TotalWaste += part.TotalWaste
 			s.Actual += part.Actual
 			s.Ideal += part.Ideal
 		}
