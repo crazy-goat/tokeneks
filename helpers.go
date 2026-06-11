@@ -99,6 +99,17 @@ func toolCallIsError(status string) bool {
 	return status == "error" || status == "failed"
 }
 
+// truncate shortens a string to at most max characters, appending "..." if truncated.
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
+}
+
 func formatTokens(n int) string {
 	if n >= 1_000_000 {
 		return fmt.Sprintf("%.1fM", float64(n)/1e6)

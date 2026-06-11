@@ -399,11 +399,7 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 			if role == "user" {
 				lastUserPrompt = t
 				if title == "" {
-					if len(t) > 80 {
-						title = t[:77] + "..."
-					} else {
-						title = t
-					}
+					title = truncate(t, 80)
 				}
 			} else {
 				if pendingText != "" {
@@ -578,11 +574,7 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 						lastUserPrompt = t
 						// first user message also sets the session title
 						if title == "" {
-							if len(t) > 80 {
-								title = t[:77] + "..."
-							} else {
-								title = t
-							}
+							title = truncate(t, 80)
 						}
 						break
 					}
@@ -935,10 +927,7 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 					}
 					if err := json.Unmarshal(scanner.Bytes(), &first); err == nil {
 						if first.Message.Content != "" {
-							childTitle = first.Message.Content
-							if len(childTitle) > 90 {
-								childTitle = childTitle[:87] + "..."
-							}
+							childTitle = truncate(first.Message.Content, 90)
 						}
 					}
 				}

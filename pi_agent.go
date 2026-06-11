@@ -106,11 +106,7 @@ func piSessionUsage(fp string) (piSessionData, error) {
 					if text != "" {
 						data.LastUserPrompt = text
 						if data.Title == "" {
-							if len(text) > 80 {
-								data.Title = text[:77] + "..."
-							} else {
-								data.Title = text
-							}
+							data.Title = truncate(text, 80)
 						}
 						break
 					}

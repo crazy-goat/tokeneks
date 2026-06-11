@@ -209,6 +209,27 @@ func TestNewJSONLScanner_ScansBeyondDefaultBuffer(t *testing.T) {
 	}
 }
 
+func TestTruncate(t *testing.T) {
+	tests := []struct {
+		input string
+		max   int
+		want  string
+	}{
+		{"short", 80, "short"},
+		{"exactly eighty chars", 20, "exactly eighty chars"},
+		{"this is a long string that should be truncated with dots", 20, "this is a long st..."},
+	}
+	for _, tc := range tests {
+		got := truncate(tc.input, tc.max)
+		if got != tc.want {
+			t.Errorf("truncate(%q, %d) = %q, want %q", tc.input, tc.max, got, tc.want)
+		}
+		if len(got) > tc.max {
+			t.Errorf("truncate(%q, %d) = %q (len=%d), exceeds max", tc.input, tc.max, got, len(got))
+		}
+	}
+}
+
 func TestNewJSONLScanner_UsesConstants(t *testing.T) {
 	// Verify that the magic numbers 1024*1024 and 10*1024*1024 are no longer
 	// used as literals in production code (they should be in helpers.go constants)
