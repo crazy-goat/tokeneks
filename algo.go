@@ -236,29 +236,29 @@ func Summarize(rows []IdealRow, prices ModelPrices) Summary {
 }
 
 func printDetailRowsClaude(rows []ClaudeIdealRow, prices ModelPrices) {
-	fmt.Printf("%4s  %7s  %7s  %7s  %6s  │  %8s  %8s  %8s  %6s  │  %7s  %8s\n",
-		"Step", "c.read", "c.write", "input", "output", "i_cr", "i_cc", "i_in", "out", "waste", "note")
-	fmt.Println(strings.Repeat("-", separatorWidthClaude))
+	fmt.Printf("%4s  %7s  %7s  %7s  %6s  │  %8s  %8s  %6s  │  %7s  %8s\n",
+		"Step", "c.read", "c.write", "input", "output", "i_cr", "i_cc", "out", "waste", "note")
+	fmt.Println(strings.Repeat("-", 99))
 
 	for i, r := range rows {
-		fmt.Printf("%4d  %7d  %7d  %7d  %6d  │  %8d  %8d  %8d  %6d  │  %7d  %8s\n",
+		fmt.Printf("%4d  %7d  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d  %8s\n",
 			i+1, r.CacheRead, r.CacheCreation, r.Input, r.Output,
-			r.IdealCR, r.IdealCC, r.IdealIn, r.Output,
+			r.IdealCR, r.IdealCC, r.Output,
 			r.Waste, r.Note())
 	}
 
-	fmt.Println(strings.Repeat("-", separatorWidthClaude))
+	fmt.Println(strings.Repeat("-", 99))
 	s := SummarizeClaude(rows, prices)
-	fmt.Printf("%4s  %7d  %7d  %7d  %6d  │  %8d  %8d  %8d  %6d  │  %7d\n",
+	fmt.Printf("%4s  %7d  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d\n",
 		"SUM", s.TotalCR, s.TotalCC, s.TotalIn, s.TotalOut,
-		s.TotalIdealCR, s.TotalIdealCC, s.TotalIdealIn, s.TotalOut,
+		s.TotalIdealCR, s.TotalIdealCC, s.TotalOut,
 		s.TotalWaste)
-	fmt.Printf("%4s  %7.2f  %7.2f  %7.2f  %6.2f  │  %8.2f  %8.2f  %8.2f  %6.2f  │  %7.2f\n",
+	fmt.Printf("%4s  %7.2f  %7.2f  %7.2f  %6.2f  │  %8.2f  %8.2f  %6.2f  │  %7.2f\n",
 		"$",
 		float64(s.TotalCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalCC)*prices.CacheCreation/tokensPerMillion,
 		float64(s.TotalIn)*prices.Input/tokensPerMillion, float64(s.TotalOut)*prices.Output/tokensPerMillion,
 		float64(s.TotalIdealCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalIdealCC)*prices.CacheCreation/tokensPerMillion,
-		float64(s.TotalIdealIn)*prices.Input/tokensPerMillion, float64(s.TotalOut)*prices.Output/tokensPerMillion,
+		float64(s.TotalOut)*prices.Output/tokensPerMillion,
 		float64(s.TotalWaste)*(prices.Input-prices.CacheRead)/tokensPerMillion)
 }
 

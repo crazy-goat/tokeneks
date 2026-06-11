@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"math"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -94,7 +97,7 @@ func TestSummarize_EquivalentToClaudeWhenNoCacheCreation(t *testing.T) {
 	}
 }
 
-// S4: IdealIn is always 0 in ComputeIdealClaude — documents this as a known structural issue
+// S4: printDetailRowsClaude should not print the meaningless i_in column.
 func TestComputeIdealClaude_IdealInRemoved(t *testing.T) {
 	steps := []StepData{
 		{Input: 500, CacheCreation: 500, CacheRead: 0, Output: 100},
@@ -103,15 +106,30 @@ func TestComputeIdealClaude_IdealInRemoved(t *testing.T) {
 	}
 	prices := ModelPrices{Input: 5.5, CacheCreation: 6.75, CacheRead: 0.55, Output: 27.5}
 	rows := ComputeIdealClaude(steps, prices)
-	// IdealIn was always 0 for Claude; it has been removed from ClaudeIdealRow.
-	// Verify that the output format still works correctly (no panic, sensible values).
 	if len(rows) != len(steps) {
 		t.Fatalf("expected %d rows, got %d", len(steps), len(rows))
 	}
-	for i, r := range rows {
-		if r.IdealCR < 0 {
-			t.Errorf("step %d: IdealCR=%d, expected >= 0", i, r.IdealCR)
-		}
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	printDetailRowsClaude(rows, prices)
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "i_in") {
+		t.Fatalf("printDetailRowsClaude still prints i_in column:\n%s", out)
+	}
+	if !strings.Contains(out, "i_cr") || !strings.Contains(out, "i_cc") {
+		t.Fatalf("printDetailRowsClaude output missing expected Claude columns:\n%s", out)
 	}
 }
 
