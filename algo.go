@@ -180,31 +180,61 @@ func ComputeIdealClaude(steps []StepData, prices ModelPrices) []ClaudeIdealRow {
 	return rows
 }
 
-func printDetailRowsClaude(rows []IdealRow, prices ModelPrices) {
-	fmt.Printf("%4s  %7s  %7s  %7s  %6s  │  %8s  %8s  %6s  │  %7s  %8s\n",
-		"Step", "c.read", "c.write", "input", "output", "i_cr", "i_cc", "out", "waste", "note")
-	fmt.Println(strings.Repeat("-", 99))
+func printDetailRows(rows []IdealRow, prices ModelPrices, showCC bool) {
+	if showCC {
+		fmt.Printf("%4s  %7s  %7s  %7s  %6s  │  %8s  %8s  %6s  │  %7s  %8s\n",
+			"Step", "c.read", "c.write", "input", "output", "i_cr", "i_cc", "out", "waste", "note")
+		fmt.Println(strings.Repeat("-", separatorWidthClaude))
+
+		for i, r := range rows {
+			fmt.Printf("%4d  %7d  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d  %8s\n",
+				i+1, r.CacheRead, r.CacheCreation, r.Input, r.Output,
+				r.IdealCR, r.IdealCC, r.Output,
+				r.Waste, r.Note())
+		}
+
+		fmt.Println(strings.Repeat("-", separatorWidthClaude))
+		s := SummarizeClaude(rows, prices)
+		fmt.Printf("%4s  %7d  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d\n",
+			"SUM", s.TotalCR, s.TotalCC, s.TotalIn, s.TotalOut,
+			s.TotalIdealCR, s.TotalIdealCC, s.TotalOut,
+			s.TotalWaste)
+		fmt.Printf("%4s  %7.2f  %7.2f  %7.2f  %6.2f  │  %8.2f  %8.2f  %6.2f  │  %7.2f\n",
+			"$",
+			float64(s.TotalCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalCC)*prices.CacheCreation/tokensPerMillion,
+			float64(s.TotalIn)*prices.Input/tokensPerMillion, float64(s.TotalOut)*prices.Output/tokensPerMillion,
+			float64(s.TotalIdealCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalIdealCC)*prices.CacheCreation/tokensPerMillion,
+			float64(s.TotalOut)*prices.Output/tokensPerMillion,
+			float64(s.TotalWaste)*(prices.Input-prices.CacheRead)/tokensPerMillion)
+		return
+	}
+
+	fmt.Printf("%4s  %7s  %7s  %6s  │  %8s  %8s  %6s  │  %7s  %8s\n",
+		"Step", "c.read", "input", "output", "i_cr", "i_in", "out", "waste", "note")
+	fmt.Println(strings.Repeat("-", separatorWidthKimi))
 
 	for i, r := range rows {
-		fmt.Printf("%4d  %7d  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d  %8s\n",
-			i+1, r.CacheRead, r.CacheCreation, r.Input, r.Output,
-			r.IdealCR, r.IdealCC, r.Output,
+		fmt.Printf("%4d  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d  %8s\n",
+			i+1, r.CacheRead, r.Input, r.Output,
+			r.IdealCR, r.IdealIn, r.Output,
 			r.Waste, r.Note())
 	}
 
-	fmt.Println(strings.Repeat("-", 99))
-	s := SummarizeClaude(rows, prices)
-	fmt.Printf("%4s  %7d  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d\n",
-		"SUM", s.TotalCR, s.TotalCC, s.TotalIn, s.TotalOut,
-		s.TotalIdealCR, s.TotalIdealCC, s.TotalOut,
+	fmt.Println(strings.Repeat("-", separatorWidthKimi))
+	s := Summarize(rows, prices)
+	fmt.Printf("%4s  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d\n",
+		"SUM", s.TotalCR, s.TotalIn, s.TotalOut,
+		s.TotalIdealCR, s.TotalIdealIn, s.TotalOut,
 		s.TotalWaste)
-	fmt.Printf("%4s  %7.2f  %7.2f  %7.2f  %6.2f  │  %8.2f  %8.2f  %6.2f  │  %7.2f\n",
+	fmt.Printf("%4s  %7.2f  %7.2f  %6.2f  │  %8.2f  %8.2f  %6.2f  │  %7.2f\n",
 		"$",
-		float64(s.TotalCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalCC)*prices.CacheCreation/tokensPerMillion,
-		float64(s.TotalIn)*prices.Input/tokensPerMillion, float64(s.TotalOut)*prices.Output/tokensPerMillion,
-		float64(s.TotalIdealCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalIdealCC)*prices.CacheCreation/tokensPerMillion,
-		float64(s.TotalOut)*prices.Output/tokensPerMillion,
+		float64(s.TotalCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalIn)*prices.Input/tokensPerMillion, float64(s.TotalOut)*prices.Output/tokensPerMillion,
+		float64(s.TotalIdealCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalIdealIn)*prices.Input/tokensPerMillion, float64(s.TotalOut)*prices.Output/tokensPerMillion,
 		float64(s.TotalWaste)*(prices.Input-prices.CacheRead)/tokensPerMillion)
+}
+
+func printDetailRowsClaude(rows []IdealRow, prices ModelPrices) {
+	printDetailRows(rows, prices, true)
 }
 
 // ComputeIdeal calculates ideal cache_read and waste per step (original for Kimi K2.6)
@@ -258,29 +288,4 @@ func ComputeIdeal(steps []StepData) []IdealRow {
 	}
 
 	return rows
-}
-
-func printDetailRows(rows []IdealRow, prices ModelPrices) {
-	fmt.Printf("%4s  %7s  %7s  %6s  │  %8s  %8s  %6s  │  %7s  %8s\n",
-		"Step", "c.read", "input", "output", "i_cr", "i_in", "out", "waste", "note")
-	fmt.Println(strings.Repeat("-", separatorWidthKimi))
-
-	for i, r := range rows {
-		fmt.Printf("%4d  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d  %8s\n",
-			i+1, r.CacheRead, r.Input, r.Output,
-			r.IdealCR, r.IdealIn, r.Output,
-			r.Waste, r.Note())
-	}
-
-	fmt.Println(strings.Repeat("-", separatorWidthKimi))
-	s := Summarize(rows, prices)
-	fmt.Printf("%4s  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d\n",
-		"SUM", s.TotalCR, s.TotalIn, s.TotalOut,
-		s.TotalIdealCR, s.TotalIdealIn, s.TotalOut,
-		s.TotalWaste)
-	fmt.Printf("%4s  %7.2f  %7.2f  %6.2f  │  %8.2f  %8.2f  %6.2f  │  %7.2f\n",
-		"$",
-		float64(s.TotalCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalIn)*prices.Input/tokensPerMillion, float64(s.TotalOut)*prices.Output/tokensPerMillion,
-		float64(s.TotalIdealCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalIdealIn)*prices.Input/tokensPerMillion, float64(s.TotalOut)*prices.Output/tokensPerMillion,
-		float64(s.TotalWaste)*(prices.Input-prices.CacheRead)/tokensPerMillion)
 }

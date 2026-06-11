@@ -171,7 +171,7 @@ func ocDetail(sessionID string) error {
 	fmt.Printf("Model:   %s\n\n", model)
 
 	rows := ComputeIdeal(steps)
-	printDetailRows(rows, prices)
+	printDetailRows(rows, prices, false)
 
 	s := Summarize(rows, prices)
 	fmt.Printf("\nActual paid:  $%.2f\n", s.Actual)

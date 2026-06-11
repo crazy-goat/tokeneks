@@ -116,7 +116,7 @@ func TestComputeIdealClaude_IdealInRemoved(t *testing.T) {
 		t.Fatalf("os.Pipe: %v", err)
 	}
 	os.Stdout = w
-	printDetailRowsClaude(rows, prices)
+	printDetailRows(rows, prices, true)
 	w.Close()
 	os.Stdout = oldStdout
 

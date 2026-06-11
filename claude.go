@@ -356,7 +356,7 @@ func claudeDetail(input string) error {
 		}
 		fmt.Printf("=== %s (%d messages) ===\n\n", model, len(byModel[model]))
 		rows := ComputeIdealClaude(byModel[model], prices)
-		printDetailRowsClaude(rows, prices)
+		printDetailRows(rows, prices, true)
 		s := SummarizeClaude(rows, prices)
 		totalActual += s.Actual
 		totalIdeal += s.Ideal

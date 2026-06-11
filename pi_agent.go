@@ -436,7 +436,7 @@ func piDetail(input string, days int) error {
 
 		if prices.CacheCreation == 0 {
 			rows := ComputeIdeal(steps)
-			printDetailRows(rows, prices)
+			printDetailRows(rows, prices, false)
 			s := Summarize(rows, prices)
 			totalActual += s.Actual
 			totalIdeal += s.Ideal
