@@ -38,7 +38,62 @@ func ocSteps(sessionID string) ([]StepData, error) {
 		}
 		steps = append(steps, s)
 	}
-	return steps, nil
+	return steps, rows.Err()
+}
+
+func ocStepsBatch(ids []string) (map[string][]StepData, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	db, err := openOCDB()
+	if err != nil {
+		return nil, err
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := `
+		SELECT
+			session_id,
+			json_extract(data, '$.tokens.input'),
+			json_extract(data, '$.tokens.cache.read'),
+			json_extract(data, '$.tokens.output')
+		FROM part
+		WHERE session_id IN (` + strings.Join(placeholders, ",") + `)
+		AND json_extract(data, '$.type') = 'step-finish'
+		ORDER BY session_id, time_created
+	`
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string][]StepData)
+	for rows.Next() {
+		var sessionID string
+		var step StepData
+		if err := rows.Scan(&sessionID, &step.Input, &step.CacheRead, &step.Output); err != nil {
+			return nil, err
+		}
+		result[sessionID] = append(result[sessionID], step)
+	}
+	return result, rows.Err()
+}
+
+func ocSessionSummary(steps []StepData, model string) Summary {
+	prices := ocModelPrices[model]
+	if prices.Input == 0 {
+		prices = ocModelPrices["Kimi K2.6"]
+	}
+	return Summarize(ComputeIdeal(steps), prices)
 }
 
 func ocToolCalls(sessionID string) (int, error) {
@@ -127,18 +182,26 @@ func ocSessions(days int, date string) ([]ocSession, error) {
 	defer rows.Close()
 
 	var sessions []ocSession
+	ids := make([]string, 0)
 	for rows.Next() {
 		var s ocSession
 		if err := rows.Scan(&s.ID, &s.Title, &s.Model, &s.Provider, &s.CreatedAt, &s.LastActivity, &s.Steps,
 			&s.TokensInput, &s.TokensOutput, &s.TokensCacheRead, &s.TokensCacheWrite, &s.ParentID); err != nil {
 			return nil, err
 		}
-		cost, err := ocSessionCost(s.ID, s.Model)
-		if err != nil {
-			return nil, err
-		}
-		s.Cost = cost
+		ids = append(ids, s.ID)
 		sessions = append(sessions, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	stepsBySession, err := ocStepsBatch(ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		sessions[i].Cost = ocSessionSummary(stepsBySession[sessions[i].ID], sessions[i].Model).Actual
 	}
 	return sessions, nil
 }
@@ -198,27 +261,28 @@ func ocList(days int, date string) error {
 
 	modelSet := make(map[string]struct{})
 	unpricedModels := make(map[string]struct{})
+	ids := make([]string, 0, len(sessions))
 	for _, sess := range sessions {
-		steps, err := ocSteps(sess.ID)
-		if err != nil {
-			continue
-		}
-		rows := ComputeIdeal(steps)
-
-		prices := ocModelPrices[sess.Model]
-		if prices.Input == 0 {
-			prices = defaultPrices
+		ids = append(ids, sess.ID)
+		modelSet[sess.Model] = struct{}{}
+		if ocModelPrices[sess.Model].Input == 0 {
 			unpricedModels[sess.Model] = struct{}{}
 		}
-		modelSet[sess.Model] = struct{}{}
+	}
 
-		s := Summarize(rows, prices)
+	stepsBySession, err := ocStepsBatch(ids)
+	if err != nil {
+		return err
+	}
 
-		totalActual += s.Actual
-		totalIdeal += s.Ideal
-		totalIn += s.TotalIn
-		totalCR += s.TotalCR
-		totalOut += s.TotalOut
+	for _, sess := range sessions {
+		steps := stepsBySession[sess.ID]
+		summary := ocSessionSummary(steps, sess.Model)
+		totalActual += summary.Actual
+		totalIdeal += summary.Ideal
+		totalIn += summary.TotalIn
+		totalCR += summary.TotalCR
+		totalOut += summary.TotalOut
 
 		timestamp := time.Unix(sess.CreatedAt/1000, 0).UTC().Format("2006-01-02 15:04:05")
 		shortTitle := sess.Title
@@ -226,16 +290,16 @@ func ocList(days int, date string) error {
 			shortTitle = shortTitle[:28] + ".."
 		}
 
-		tokens := s.TotalIn + s.TotalCR + s.TotalOut
-		costPer1M := perMillion(s.Actual, tokens)
-		idealPer1M := perMillion(s.Ideal, tokens)
+		tokens := summary.TotalIn + summary.TotalCR + summary.TotalOut
+		costPer1M := perMillion(summary.Actual, tokens)
+		idealPer1M := perMillion(summary.Ideal, tokens)
 
 		modelDisplay := sess.Model
 		if sess.Provider != "" {
 			modelDisplay = sess.Provider + "/" + sess.Model
 		}
 		fmt.Printf("%19s  %-18.18s  %-27s  %-30s  %5d  %7s  %6.2f  %6.2f  %8.2f  %6.1f%%  %7.2f  %7.2f\n",
-			timestamp, modelDisplay, sess.ID, shortTitle, sess.Steps, formatTokens(tokens), s.Actual, s.Ideal, s.Overpay, s.PctIdeal, costPer1M, idealPer1M)
+			timestamp, modelDisplay, sess.ID, shortTitle, sess.Steps, formatTokens(tokens), summary.Actual, summary.Ideal, summary.Overpay, summary.PctIdeal, costPer1M, idealPer1M)
 	}
 
 	fmt.Println(strings.Repeat("-", separatorWidthOpenCode))

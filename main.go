@@ -134,17 +134,16 @@ func printTotal(days int) error {
 		return fmt.Errorf("OC: %w", err)
 	}
 	var ocActual, ocIdeal float64
+	ocIDs := make([]string, 0, len(ocSessions))
 	for _, sess := range ocSessions {
-		steps, err := ocSteps(sess.ID)
-		if err != nil {
-			continue
-		}
-		rows := ComputeIdeal(steps)
-		prices := ocModelPrices[sess.Model]
-		if prices.Input == 0 {
-			prices = kimi
-		}
-		s := Summarize(rows, prices)
+		ocIDs = append(ocIDs, sess.ID)
+	}
+	ocStepsBySession, err := ocStepsBatch(ocIDs)
+	if err != nil {
+		return fmt.Errorf("OC: %w", err)
+	}
+	for _, sess := range ocSessions {
+		s := ocSessionSummary(ocStepsBySession[sess.ID], sess.Model)
 		ocActual += s.Actual
 		ocIdeal += s.Ideal
 	}
