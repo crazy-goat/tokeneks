@@ -238,7 +238,7 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 			var totalInput, totalPromptInput, totalOutput, totalCR, totalCW int
 			var totalCost float64
 			for _, u := range byModel {
-				prices := claudePrices[u.Model]
+				prices := claudeGlobalModelPrices()[u.Model]
 				u.Cost = float64(u.Input)*prices.Input/tokensPerMillion +
 					float64(u.CacheWrite)*prices.CacheCreation/tokensPerMillion +
 					float64(u.CacheRead)*prices.CacheRead/tokensPerMillion +

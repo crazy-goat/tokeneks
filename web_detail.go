@@ -840,7 +840,7 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 
 		idx, exists := msgIndexByID[msg.Message.ID]
 		if !exists {
-			prices := claudePrices[msg.Message.Model]
+			prices := claudeGlobalModelPrices()[msg.Message.Model]
 			cost := float64(u.InputTokens)*prices.Input/tokensPerMillion +
 				float64(u.CacheCreationInputTokens)*prices.CacheCreation/tokensPerMillion +
 				float64(u.CacheReadInputTokens)*prices.CacheRead/tokensPerMillion +

@@ -7,19 +7,30 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 const defaultClaudeSessions = "~/.claude/projects"
 const defaultClaudePricing = "~/.tokeneks/claude_models.json"
 
-var claudePrices = initClaudePrices()
+var (
+	claudePricesOnce sync.Once
+	claudePrices     map[string]ModelPrices
+)
 
 type claudePricesFile map[string]struct {
 	Input         float64 `json:"input"`
 	CacheCreation float64 `json:"cacheCreation"`
 	CacheRead     float64 `json:"cacheRead"`
 	Output        float64 `json:"output"`
+}
+
+func claudeGlobalModelPrices() map[string]ModelPrices {
+	claudePricesOnce.Do(func() {
+		claudePrices = initClaudePrices()
+	})
+	return claudePrices
 }
 
 func initClaudePrices() map[string]ModelPrices {
@@ -346,7 +357,7 @@ func claudeDetail(input string) error {
 			primaryModel = m
 		}
 	}
-	prices := claudePrices[primaryModel]
+	prices := claudeGlobalModelPrices()[primaryModel]
 	if prices.Input == 0 {
 		return fmt.Errorf("no prices configured for model %s", primaryModel)
 	}
@@ -371,7 +382,7 @@ func claudeDetail(input string) error {
 
 	var totalActual, totalIdeal float64
 	for i, model := range modelNames {
-		prices := claudePrices[model]
+		prices := claudeGlobalModelPrices()[model]
 		if prices.Input == 0 {
 			return fmt.Errorf("no prices configured for model %s", model)
 		}
@@ -427,7 +438,7 @@ func claudeList(days int, date string) error {
 
 		byModel := make(map[string][]StepData)
 		for _, step := range res.Steps {
-			prices := claudePrices[step.Model]
+			prices := claudeGlobalModelPrices()[step.Model]
 			if prices.Input == 0 {
 				byModel = nil
 				break
@@ -440,7 +451,7 @@ func claudeList(days int, date string) error {
 
 		var s ClaudeSummary
 		for model, modelSteps := range byModel {
-			prices := claudePrices[model]
+			prices := claudeGlobalModelPrices()[model]
 			rows := ComputeIdealClaude(modelSteps, prices)
 			part := SummarizeClaude(rows, prices)
 			s.TotalCC += part.TotalCC
@@ -517,15 +528,15 @@ func claudeList(days int, date string) error {
 		"TOTAL", "", "", "", "", formatTokens(totalTokens), totalActual, totalIdeal, totalOverpay, pct, totalCostPer1M, totalIdealPer1M)
 	fmt.Println()
 	fmt.Printf("Opus4.7:  In=$%.2f/M  CC=$%.2f/M  CR=$%.2f/M  Out=$%.2f/M\n",
-		claudePrices["claude-opus-4-7"].Input,
-		claudePrices["claude-opus-4-7"].CacheCreation,
-		claudePrices["claude-opus-4-7"].CacheRead,
-		claudePrices["claude-opus-4-7"].Output)
+		claudeGlobalModelPrices()["claude-opus-4-7"].Input,
+		claudeGlobalModelPrices()["claude-opus-4-7"].CacheCreation,
+		claudeGlobalModelPrices()["claude-opus-4-7"].CacheRead,
+		claudeGlobalModelPrices()["claude-opus-4-7"].Output)
 	fmt.Printf("Sonnet4.6: In=$%.2f/M  CC=$%.2f/M  CR=$%.2f/M  Out=$%.2f/M\n",
-		claudePrices["claude-sonnet-4-6"].Input,
-		claudePrices["claude-sonnet-4-6"].CacheCreation,
-		claudePrices["claude-sonnet-4-6"].CacheRead,
-		claudePrices["claude-sonnet-4-6"].Output)
+		claudeGlobalModelPrices()["claude-sonnet-4-6"].Input,
+		claudeGlobalModelPrices()["claude-sonnet-4-6"].CacheCreation,
+		claudeGlobalModelPrices()["claude-sonnet-4-6"].CacheRead,
+		claudeGlobalModelPrices()["claude-sonnet-4-6"].Output)
 
 	return nil
 }
