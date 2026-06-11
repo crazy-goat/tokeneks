@@ -336,25 +336,24 @@ func piParentSessionInfo(fp string) (parentPath, parentID string, ok bool) {
 	if _, err := os.Stat(parentPath); err != nil {
 		return "", "", false
 	}
-	parts := strings.SplitN(parentBase, "_", 2)
-	if len(parts) != 2 {
+	sessionID, ok := sessionIDFromBase(parentBase)
+	if !ok {
 		return "", "", false
 	}
-	return parentPath, parts[1], true
+	return parentPath, sessionID, true
 }
 
 func piSessionIDFromPath(fp string) string {
 	base := filepath.Base(fp)
-	if strings.HasSuffix(base, ".jsonl") && strings.Contains(base, "_") {
-		parts := strings.SplitN(strings.TrimSuffix(base, ".jsonl"), "_", 2)
-		if len(parts) == 2 {
-			return parts[1]
-		}
-	}
 	if base == "session.jsonl" {
 		runDir := filepath.Dir(fp)
 		runIDDir := filepath.Dir(runDir)
 		return filepath.Base(runIDDir)
+	}
+	if strings.HasSuffix(base, ".jsonl") {
+		if sessionID, err := piSessionIDFromFilename(base); err == nil {
+			return sessionID
+		}
 	}
 	return strings.TrimSuffix(base, ".jsonl")
 }
