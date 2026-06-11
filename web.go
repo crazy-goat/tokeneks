@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -43,6 +44,37 @@ type WebSession struct {
 	ParentID        string          `json:"parentId,omitempty"`
 	ChildCount      int             `json:"childCount,omitempty"`
 	IsSubsession    bool            `json:"isSubsession,omitempty"`
+}
+
+var sessionsCache struct {
+	mu         sync.Mutex
+	data       []WebSession
+	err        error
+	expires    time.Time
+	cachedDays int
+}
+
+func getCachedSessions(days int) ([]WebSession, error) {
+	sessionsCache.mu.Lock()
+	cached := sessionsCache.cachedDays == days && time.Now().Before(sessionsCache.expires)
+	if cached {
+		data := sessionsCache.data
+		err := sessionsCache.err
+		sessionsCache.mu.Unlock()
+		return data, err
+	}
+	sessionsCache.mu.Unlock()
+
+	data, err := gatherWebSessions(days)
+
+	sessionsCache.mu.Lock()
+	sessionsCache.data = data
+	sessionsCache.err = err
+	sessionsCache.expires = time.Now().Add(30 * time.Second)
+	sessionsCache.cachedDays = days
+	sessionsCache.mu.Unlock()
+
+	return data, err
 }
 
 func gatherWebSessions(days int) ([]WebSession, error) {
@@ -372,14 +404,14 @@ func runWeb(port string, days int) error {
 				}
 			}
 		}
-		sessions, err := gatherWebSessions(effectiveDays)
+		sessions, err := getCachedSessions(effectiveDays)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		sessions = filterWebSessionsByDateRange(sessions, start, end)
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Cache-Control", "private, max-age=30")
 		json.NewEncoder(w).Encode(sessions)
 	})
 
