@@ -14,6 +14,7 @@ import (
 
 type ToolCallInfo struct {
 	Name       string          `json:"name"`
+	ID         string          `json:"id,omitempty"`
 	Input      json.RawMessage `json:"input,omitempty"`
 	Output     json.RawMessage `json:"output,omitempty"`
 	Error      bool            `json:"error,omitempty"`
@@ -797,7 +798,7 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 								for i := len(steps) - 1; i >= 0; i-- {
 									matched := false
 									for j := range steps[i].ToolCalls {
-										if steps[i].ToolCalls[j].DurationMs == 0 {
+										if steps[i].ToolCalls[j].ID == item.ToolUseID {
 											steps[i].ToolCalls[j].DurationMs = durMs
 											matched = true
 											break
@@ -886,7 +887,7 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 					}
 				}
 			case "tool_use":
-				tc := ToolCallInfo{Name: c.Name, Input: c.Input}
+				tc := ToolCallInfo{Name: c.Name, ID: c.ID, Input: c.Input}
 				s.ToolCalls = append(s.ToolCalls, tc)
 				if c.ID != "" && !assTS.IsZero() {
 					toolCallStart[c.ID] = assTS
