@@ -224,7 +224,10 @@ func ocList(days int, date string) error {
 
 	fmt.Println(strings.Repeat("-", 173))
 	totalOverpay := max(totalActual-totalIdeal, 0)
-	pct := totalOverpay / totalIdeal * 100
+	pct := 0.0
+	if totalIdeal > 0 {
+		pct = totalOverpay / totalIdeal * 100
+	}
 
 	totalTokens := totalIn + totalCR + totalOut
 	totalCostPer1M := 0.0

@@ -173,12 +173,27 @@ func printTotal(days int) error {
 		totalOverpay = 0
 	}
 
+	ocOverpay := max(ocActual-ocIdeal, 0)
+	ocPct := 0.0
+	if ocIdeal > 0 {
+		ocPct = ocOverpay / ocIdeal * 100
+	}
+	piOverpay := max(piActual-piIdeal, 0)
+	piPct := 0.0
+	if piIdeal > 0 {
+		piPct = piOverpay / piIdeal * 100
+	}
+	totalPct := 0.0
+	if totalIdeal > 0 {
+		totalPct = totalOverpay / totalIdeal * 100
+	}
+
 	fmt.Println("         Paid     Ideal    Overpay   %ideal")
 	fmt.Println("─────────────────────────────────────────────")
-	fmt.Printf("OC     %7.2f  %7.2f  %7.2f  %5.1f%%\n", ocActual, ocIdeal, max(ocActual-ocIdeal, 0), max(ocActual-ocIdeal, 0)/ocIdeal*100)
-	fmt.Printf("PI     %7.2f  %7.2f  %7.2f  %5.1f%%\n", piActual, piIdeal, max(piActual-piIdeal, 0), max(piActual-piIdeal, 0)/piIdeal*100)
+	fmt.Printf("OC     %7.2f  %7.2f  %7.2f  %5.1f%%\n", ocActual, ocIdeal, ocOverpay, ocPct)
+	fmt.Printf("PI     %7.2f  %7.2f  %7.2f  %5.1f%%\n", piActual, piIdeal, piOverpay, piPct)
 	fmt.Println("─────────────────────────────────────────────")
-	fmt.Printf("TOTAL  %7.2f  %7.2f  %7.2f  %5.1f%%\n", totalActual, totalIdeal, totalOverpay, totalOverpay/totalIdeal*100)
+	fmt.Printf("TOTAL  %7.2f  %7.2f  %7.2f  %5.1f%%\n", totalActual, totalIdeal, totalOverpay, totalPct)
 	fmt.Println()
 	fmt.Printf("Input=$%.2f/M  CacheRead=$%.2f/M  Output=$%.2f/M\n", PriceInput, PriceCacheRead, PriceOutput)
 
