@@ -313,8 +313,10 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 
 	var title, modelRaw, parentID string
 	var createdAt int64
-	_ = db.QueryRow("SELECT title, model, time_created, ifnull(parent_id, '') FROM session WHERE id = ?", sessionID).Scan(&title, &modelRaw, &createdAt, &parentID)
-	modelName := ""
+	var modelName string
+	if err := db.QueryRow("SELECT title, model, time_created, ifnull(parent_id, '') FROM session WHERE id = ?", sessionID).Scan(&title, &modelRaw, &createdAt, &parentID); err != nil && err != sql.ErrNoRows {
+		// non-row errors are unexpected; proceed with zero values
+	}
 	if modelRaw != "" {
 		var m struct {
 			ID string `json:"id"`
@@ -485,7 +487,9 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 	}
 	if parentID != "" {
 		var parentTitle string
-		_ = db.QueryRow("SELECT title FROM session WHERE id = ?", parentID).Scan(&parentTitle)
+		if err := db.QueryRow("SELECT title FROM session WHERE id = ?", parentID).Scan(&parentTitle); err != nil && err != sql.ErrNoRows {
+			// best-effort parent title lookup; leave empty
+		}
 		d.Parent = &SessionLink{Agent: "OpenCode", ID: parentID, Title: parentTitle}
 	}
 	childRows, err := db.Query("SELECT id, title, json_extract(model, '$.id'), ifnull(tokens_input,0), ifnull(tokens_output,0), ifnull(tokens_cache_read,0), ifnull(tokens_cache_write,0), cost FROM session WHERE parent_id = ? ORDER BY time_created ASC", sessionID)
@@ -837,7 +841,7 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 		assTS, _ := parseTS(msg.Timestamp)
 		var contentItems []claudeContentItem
 		if len(msg.Message.Content) > 0 && msg.Message.Content[0] == '[' {
-			_ = json.Unmarshal(msg.Message.Content, &contentItems)
+			json.Unmarshal(msg.Message.Content, &contentItems) // best-effort; nil on failure
 		}
 
 		idx, exists := msgIndexByID[msg.Message.ID]
