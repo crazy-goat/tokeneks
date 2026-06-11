@@ -603,6 +603,7 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 					tc.DurationMs = respTS.Sub(reqTS).Milliseconds()
 				}
 			}
+			delete(toolCallTimes, entry.Message.ToolCallID)
 			toolCallBuffer = append(toolCallBuffer, tc)
 			continue
 		}
