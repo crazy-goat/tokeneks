@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,19 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+const (
+	scannerInitBuf = 1024 * 1024  // 1 MB initial buffer for JSONL scanner
+	scannerMaxBuf  = 10 * 1024 * 1024 // 10 MB max buffer
+)
+
+// newJSONLScanner creates a bufio.Scanner with a large buffer suitable for JSONL files.
+// The default 64 KB scanner limit is too small for long JSONL lines.
+func newJSONLScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, scannerInitBuf), scannerMaxBuf)
+	return scanner
+}
 
 func expandHome(path string) string {
 	if path == "~" {

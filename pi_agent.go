@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -85,8 +84,7 @@ func piSessionUsage(fp string) (piSessionData, error) {
 	var data piSessionData
 	data.ModelProviders = make(map[string]string)
 	modelCounts := make(map[string]int)
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	scanner := newJSONLScanner(f)
 
 	for scanner.Scan() {
 		var entry piMessageEntry

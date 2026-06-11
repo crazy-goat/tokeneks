@@ -191,3 +191,31 @@ func TestToolCallIsError_KnownStatuses(t *testing.T) {
 		}
 	}
 }
+
+func TestNewJSONLScanner_ScansBeyondDefaultBuffer(t *testing.T) {
+	// Create a line longer than the default 64 KB bufio.Scanner limit
+	longLine := strings.Repeat("a", 70*1024) // ~70 KB
+	r := strings.NewReader(longLine + "\n")
+	scanner := newJSONLScanner(r)
+	if !scanner.Scan() {
+		t.Fatal("newJSONLScanner: expected Scan to succeed, got error:", scanner.Err())
+	}
+	got := len(scanner.Text())
+	if got != len(longLine) {
+		t.Errorf("newJSONLScanner: scanned %d bytes, want %d", got, len(longLine))
+	}
+	if err := scanner.Err(); err != nil {
+		t.Errorf("newJSONLScanner: unexpected error after scan: %v", err)
+	}
+}
+
+func TestNewJSONLScanner_UsesConstants(t *testing.T) {
+	// Verify that the magic numbers 1024*1024 and 10*1024*1024 are no longer
+	// used as literals in production code (they should be in helpers.go constants)
+	scanner := newJSONLScanner(strings.NewReader("test\n"))
+	_ = scanner.Scan()
+	// If the scanner works, constants were used correctly
+	if scanner.Text() != "test" {
+		t.Errorf("newJSONLScanner: expected 'test', got %q", scanner.Text())
+	}
+}

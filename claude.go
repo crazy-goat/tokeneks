@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -110,8 +109,7 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 	var toolCalls int
 	var lastUserPrompt string
 	var lastActivity time.Time
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	scanner := newJSONLScanner(f)
 
 	for scanner.Scan() {
 		var msg claudeMessage

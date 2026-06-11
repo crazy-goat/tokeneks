@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -560,8 +559,7 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 		return time.Parse("2006-01-02 15:04:05", s)
 	}
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	scanner := newJSONLScanner(f)
 
 	for scanner.Scan() {
 		var entry piDetEntry
@@ -773,8 +771,7 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 		return time.Parse("2006-01-02 15:04:05", s)
 	}
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	scanner := newJSONLScanner(f)
 
 	for scanner.Scan() {
 		var msg claudeDetMsg
@@ -929,7 +926,7 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 			childID := strings.TrimSuffix(subEntry.Name(), ".jsonl")
 			childTitle := childID
 			if sf, err := os.Open(filepath.Join(subDir, subEntry.Name())); err == nil {
-				scanner := bufio.NewScanner(sf)
+				scanner := newJSONLScanner(sf)
 				if scanner.Scan() {
 					var first struct {
 						Message struct {
