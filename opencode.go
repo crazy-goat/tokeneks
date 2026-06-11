@@ -171,7 +171,7 @@ func ocList(days int, date string) error {
 
 	fmt.Printf("%19s  %-18s  %-27s  %-30s  %5s  %7s  %6s  %6s  %8s  %7s  %7s  %7s\n",
 		"DateTime", "DominantModel", "Session", "Title", "Steps", "Tokens", "Paid", "Ideal", "Overpay", "%ideal", "$/1M", "i$/1M")
-	fmt.Println(strings.Repeat("-", 173))
+	fmt.Println(strings.Repeat("-", separatorWidthOpenCode))
 
 	var totalActual, totalIdeal float64
 	var totalIn, totalCR, totalOut int
@@ -207,11 +207,11 @@ func ocList(days int, date string) error {
 		tokens := s.TotalIn + s.TotalCR + s.TotalOut
 		costPer1M := 0.0
 		if tokens > 0 {
-			costPer1M = s.Actual / float64(tokens) * 1e6
+			costPer1M = s.Actual / float64(tokens) * tokensPerMillion
 		}
 		idealPer1M := 0.0
 		if tokens > 0 {
-			idealPer1M = s.Ideal / float64(tokens) * 1e6
+			idealPer1M = s.Ideal / float64(tokens) * tokensPerMillion
 		}
 
 		modelDisplay := sess.Model
@@ -222,7 +222,7 @@ func ocList(days int, date string) error {
 			timestamp, modelDisplay, sess.ID, shortTitle, sess.Steps, formatTokens(tokens), s.Actual, s.Ideal, s.Overpay, s.PctIdeal, costPer1M, idealPer1M)
 	}
 
-	fmt.Println(strings.Repeat("-", 173))
+	fmt.Println(strings.Repeat("-", separatorWidthOpenCode))
 	totalOverpay := max(totalActual-totalIdeal, 0)
 	pct := 0.0
 	if totalIdeal > 0 {
@@ -232,11 +232,11 @@ func ocList(days int, date string) error {
 	totalTokens := totalIn + totalCR + totalOut
 	totalCostPer1M := 0.0
 	if totalTokens > 0 {
-		totalCostPer1M = totalActual / float64(totalTokens) * 1e6
+		totalCostPer1M = totalActual / float64(totalTokens) * tokensPerMillion
 	}
 	totalIdealPer1M := 0.0
 	if totalTokens > 0 {
-		totalIdealPer1M = totalIdeal / float64(totalTokens) * 1e6
+		totalIdealPer1M = totalIdeal / float64(totalTokens) * tokensPerMillion
 	}
 
 	fmt.Printf("%19s  %-18s  %-27s  %-30s  %5s  %7s  %6.2f  %6.2f  %8.2f  %6.1f%%  %7.2f  %7.2f\n",

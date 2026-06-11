@@ -414,7 +414,7 @@ func claudeList(days int, date string) error {
 
 	fmt.Printf("%19s  %-36s  %-14s  %-25s  %4s  %8s  %8s  %7s  %10s  %7s  %8s  %8s\n",
 		"DateTime", "SessionID", "DominantModel", "Project", "Msgs", "Tokens", "Paid", "Ideal", "Overpay", "%ideal", "$/1M", "i$/1M")
-	fmt.Println(strings.Repeat("-", 179))
+	fmt.Println(strings.Repeat("-", separatorWidthClaudeMix))
 
 	var totalActual, totalIdeal float64
 	var totalIn, totalCC, totalCR, totalOut int
@@ -448,9 +448,9 @@ func claudeList(days int, date string) error {
 			s.TotalIn += part.TotalIn
 			s.TotalOut += part.TotalOut
 			s.TotalIdealCR += part.TotalIdealCR
-		s.TotalIdealIn += part.TotalIdealIn
+			s.TotalIdealIn += part.TotalIdealIn
 			s.TotalIdealCC += part.TotalIdealCC
-						s.TotalWaste += part.TotalWaste
+			s.TotalWaste += part.TotalWaste
 			s.Actual += part.Actual
 			s.Ideal += part.Ideal
 		}
@@ -485,18 +485,18 @@ func claudeList(days int, date string) error {
 		tokens := s.TotalIn + s.TotalCC + s.TotalCR + s.TotalOut
 		costPer1M := 0.0
 		if tokens > 0 {
-			costPer1M = s.Actual / float64(tokens) * 1e6
+			costPer1M = s.Actual / float64(tokens) * tokensPerMillion
 		}
 		idealPer1M := 0.0
 		if tokens > 0 {
-			idealPer1M = s.Ideal / float64(tokens) * 1e6
+			idealPer1M = s.Ideal / float64(tokens) * tokensPerMillion
 		}
 
 		fmt.Printf("%19s  %-36s  %-14s  %-25s  %4d  %8s  %8.2f  %7.2f  %10.2f  %6.1f%%  %8.2f  %8.2f\n",
 			timestamp, sess.ID, modelShort, project, sess.Msgs, formatTokens(tokens), s.Actual, s.Ideal, s.Overpay, s.PctIdeal, costPer1M, idealPer1M)
 	}
 
-	fmt.Println(strings.Repeat("-", 179))
+	fmt.Println(strings.Repeat("-", separatorWidthClaudeMix))
 	totalOverpay := max(totalActual-totalIdeal, 0)
 	pct := float64(0)
 	if totalIdeal > 0 {
@@ -506,11 +506,11 @@ func claudeList(days int, date string) error {
 	totalTokens := totalIn + totalCC + totalCR + totalOut
 	totalCostPer1M := 0.0
 	if totalTokens > 0 {
-		totalCostPer1M = totalActual / float64(totalTokens) * 1e6
+		totalCostPer1M = totalActual / float64(totalTokens) * tokensPerMillion
 	}
 	totalIdealPer1M := 0.0
 	if totalTokens > 0 {
-		totalIdealPer1M = totalIdeal / float64(totalTokens) * 1e6
+		totalIdealPer1M = totalIdeal / float64(totalTokens) * tokensPerMillion
 	}
 
 	fmt.Printf("%19s  %-36s  %-14s  %-25s  %4s  %8s  %8.2f  %7.2f  %10.2f  %6.1f%%  %8.2f  %8.2f\n",

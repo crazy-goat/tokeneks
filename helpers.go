@@ -15,9 +15,19 @@ import (
 )
 
 const (
-	scannerInitBuf = 1024 * 1024  // 1 MB initial buffer for JSONL scanner
-	scannerMaxBuf  = 10 * 1024 * 1024 // 10 MB max buffer
+	scannerInitBuf          = 1024 * 1024 // 1 MB initial buffer for JSONL scanner
+	scannerMaxBuf           = 10 * 1024 * 1024
+	tokensPerMillion        = 1_000_000
+	separatorWidthKimi      = 88
+	separatorWidthClaude    = 108
+	separatorWidthOpenCode  = 173
+	separatorWidthPi        = 154
+	separatorWidthClaudeMix = 179
 )
+
+// compactThresholdPct is the compact-display threshold in percent.
+// It is a var (not const) so tests can verify the constant is used.
+var compactThresholdPct = 80
 
 // newJSONLScanner creates a bufio.Scanner with a large buffer suitable for JSONL files.
 // The default 64 KB scanner limit is too small for long JSONL lines.
@@ -111,8 +121,8 @@ func truncate(s string, max int) string {
 }
 
 func formatTokens(n int) string {
-	if n >= 1_000_000 {
-		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	if n >= tokensPerMillion {
+		return fmt.Sprintf("%.1fM", float64(n)/tokensPerMillion)
 	}
 	if n >= 1_000 {
 		return fmt.Sprintf("%.1fk", float64(n)/1e3)

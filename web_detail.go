@@ -427,7 +427,7 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 			}
 			s := StepInfo{
 				Step:       len(steps) + 1,
-				Timestamp:  time.Unix(ts/1000, (ts%1000)*1e6).UTC().Format(time.RFC3339),
+				Timestamp:  time.Unix(ts/1000, (ts%1000)*int64(time.Millisecond)).UTC().Format(time.RFC3339),
 				Model:      modelName,
 				Input:      part.Tokens.Input,
 				Output:     part.Tokens.Output,
@@ -452,21 +452,21 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 					out = json.RawMessage(b)
 				}
 				status := part.State.Status
-			isErr := toolCallIsError(status)
-			var input json.RawMessage
-			if len(part.State.Input) > 0 {
-				input = part.State.Input
-			}
-			tc := ToolCallInfo{
-				Name:   part.Tool,
-				Input:  input,
-				Output: out,
-				Error:  isErr,
-				Status: status,
-			}
+				isErr := toolCallIsError(status)
+				var input json.RawMessage
+				if len(part.State.Input) > 0 {
+					input = part.State.Input
+				}
+				tc := ToolCallInfo{
+					Name:   part.Tool,
+					Input:  input,
+					Output: out,
+					Error:  isErr,
+					Status: status,
+				}
 				// tool duration from time.start/time.end if available
 				if part.Time.Start > 0 && part.Time.End > 0 {
-					tc.DurationMs = (part.Time.End - part.Time.Start) / 1e6
+					tc.DurationMs = (part.Time.End - part.Time.Start) / int64(time.Millisecond)
 				}
 				current.ToolCalls = append(current.ToolCalls, tc)
 			}
@@ -838,10 +838,10 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 		idx, exists := msgIndexByID[msg.Message.ID]
 		if !exists {
 			prices := claudePrices[msg.Message.Model]
-			cost := float64(u.InputTokens)*prices.Input/1e6 +
-				float64(u.CacheCreationInputTokens)*prices.CacheCreation/1e6 +
-				float64(u.CacheReadInputTokens)*prices.CacheRead/1e6 +
-				float64(u.OutputTokens)*prices.Output/1e6
+			cost := float64(u.InputTokens)*prices.Input/tokensPerMillion +
+				float64(u.CacheCreationInputTokens)*prices.CacheCreation/tokensPerMillion +
+				float64(u.CacheReadInputTokens)*prices.CacheRead/tokensPerMillion +
+				float64(u.OutputTokens)*prices.Output/tokensPerMillion
 			steps = append(steps, StepInfo{
 				Step:       len(steps) + 1,
 				Timestamp:  msg.Timestamp,

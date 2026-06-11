@@ -153,35 +153,41 @@ func TestClaudeIdealRowNote_AllBranches(t *testing.T) {
 	}
 }
 
-// D3: Compact detection threshold (80%) must be consistent in both compute functions
-func TestCompactDetection_80PercentThreshold(t *testing.T) {
-	// step[1] with totalCtx 799 < 80% of step[0] totalCtx 1000 => compact
+// D3: Compact detection uses a named threshold constant.
+func TestCompactDetection_UsesNamedThreshold(t *testing.T) {
+	old := compactThresholdPct
+	compactThresholdPct = 70
+	defer func() { compactThresholdPct = old }()
+
 	steps := []StepData{
 		{Input: 1000, CacheRead: 0, Output: 0},
-		{Input: 799, CacheRead: 0, Output: 0},
+		{Input: 699, CacheRead: 0, Output: 0},
 	}
 	rows := ComputeIdeal(steps)
 	if !rows[1].IsCompact {
-		t.Error("step 1 should be compact: 799 < 80% of 1000")
+		t.Fatal("step 1 should be compact below the 70% boundary")
 	}
 
-	// exactly 800 = 80% of 1000 => NOT compact
-	steps[1].Input = 800
+	steps[1].Input = 700
 	rows = ComputeIdeal(steps)
 	if rows[1].IsCompact {
-		t.Error("step 1 should NOT be compact: 800 == 80% of 1000 (boundary)")
+		t.Fatal("step 1 should not be compact at the 70% boundary")
 	}
-}
 
-func TestCompactDetection_80PercentThreshold_Claude(t *testing.T) {
-	steps := []StepData{
+	claudeSteps := []StepData{
 		{Input: 1000, CacheCreation: 0, CacheRead: 0, Output: 0},
-		{Input: 799, CacheCreation: 0, CacheRead: 0, Output: 0},
+		{Input: 699, CacheCreation: 0, CacheRead: 0, Output: 0},
 	}
 	prices := ModelPrices{Input: 5.5, CacheCreation: 6.75, CacheRead: 0.55, Output: 27.5}
-	rows := ComputeIdealClaude(steps, prices)
-	if !rows[1].IsCompact {
-		t.Error("step 1 should be compact in Claude path: 799 < 80% of 1000")
+	claudeRows := ComputeIdealClaude(claudeSteps, prices)
+	if !claudeRows[1].IsCompact {
+		t.Fatal("Claude step 1 should be compact below the 70% boundary")
+	}
+
+	claudeSteps[1].Input = 700
+	claudeRows = ComputeIdealClaude(claudeSteps, prices)
+	if claudeRows[1].IsCompact {
+		t.Fatal("Claude step 1 should not be compact at the 70% boundary")
 	}
 }
 
@@ -191,10 +197,10 @@ func TestPiStepActualCost_MatchesInlineFormula(t *testing.T) {
 	prices := ModelPrices{Input: 0.95, CacheCreation: 1.0, CacheRead: 0.16, Output: 4.0}
 
 	got := piStepActualCost(step, prices)
-	want := float64(step.Input)*prices.Input/1e6 +
-		float64(step.CacheCreation)*prices.CacheCreation/1e6 +
-		float64(step.CacheRead)*prices.CacheRead/1e6 +
-		float64(step.Output)*prices.Output/1e6
+	want := float64(step.Input)*prices.Input/tokensPerMillion +
+		float64(step.CacheCreation)*prices.CacheCreation/tokensPerMillion +
+		float64(step.CacheRead)*prices.CacheRead/tokensPerMillion +
+		float64(step.Output)*prices.Output/tokensPerMillion
 
 	if math.Abs(got-want) > 1e-12 {
 		t.Errorf("piStepActualCost = %f, inline formula = %f, diff = %e", got, want, got-want)

@@ -64,8 +64,8 @@ func piGlobalModelPrices() map[string]ModelPrices {
 }
 
 func piStepActualCost(step StepData, prices ModelPrices) float64 {
-	return float64(step.Input)*prices.Input/1e6 +
-		float64(step.CacheCreation)*prices.CacheCreation/1e6 +
-		float64(step.CacheRead)*prices.CacheRead/1e6 +
-		float64(step.Output)*prices.Output/1e6
+	return float64(step.Input)*prices.Input/tokensPerMillion +
+		float64(step.CacheCreation)*prices.CacheCreation/tokensPerMillion +
+		float64(step.CacheRead)*prices.CacheRead/tokensPerMillion +
+		float64(step.Output)*prices.Output/tokensPerMillion
 }
