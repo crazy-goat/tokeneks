@@ -1,6 +1,41 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestExpandHome_TildeSlash(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("cannot get home dir: %v", err)
+	}
+	got := expandHome("~/foo")
+	want := filepath.Join(home, "foo")
+	if got != want {
+		t.Errorf("expandHome(~\"/foo\") = %q, want %q", got, want)
+	}
+}
+
+func TestExpandHome_BareTilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("cannot get home dir: %v", err)
+	}
+	got := expandHome("~")
+	if got != home {
+		t.Errorf("expandHome(~) = %q, want %q", got, home)
+	}
+}
+
+func TestExpandHome_NoTilde(t *testing.T) {
+	got := expandHome("/absolute/path")
+	want := "/absolute/path"
+	if got != want {
+		t.Errorf("expandHome(absolute) = %q, want %q", got, want)
+	}
+}
 
 func TestOpenOCDB_ReturnsSameInstance(t *testing.T) {
 	ocDBMu.Lock()
