@@ -264,13 +264,18 @@ func claudeSessions(days int, date, modelFilter string) ([]claudeSession, error)
 }
 
 func cleanClaudeProjectName(dirName string) string {
-	// Convert -Users-piotr-halas-work-project-name to work/project-name
+	// Convert -Users-username-work-project-name to work/project-name
 	name := dirName
-	if strings.HasPrefix(name, "-Users-piotr-halas-") {
-		name = name[len("-Users-piotr-halas-"):]
-	}
-	if strings.HasPrefix(name, "-Users-piotr-halas") {
-		name = name[len("-Users-piotr-halas"):]
+	if home, err := os.UserHomeDir(); err == nil {
+		user := filepath.Base(home)
+		dashedUser := strings.ReplaceAll(user, ".", "-")
+		prefix1 := "-Users-" + dashedUser + "-"
+		prefix2 := "-Users-" + dashedUser
+		if strings.HasPrefix(name, prefix1) {
+			name = name[len(prefix1):]
+		} else if strings.HasPrefix(name, prefix2) {
+			name = name[len(prefix2):]
+		}
 	}
 	if name == "" {
 		return "(root)"

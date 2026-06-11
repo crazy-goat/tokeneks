@@ -366,9 +366,13 @@ func piSessionIDFromPath(fp string) string {
 
 func cleanProjectName(dirName string) string {
 	name := strings.Trim(dirName, "-")
-	prefix := "Users-piotr.halas-"
-	if strings.HasPrefix(name, prefix) {
-		name = name[len(prefix):]
+	// Derive the home-prefix dynamically instead of hardcoding a username
+	if home, err := os.UserHomeDir(); err == nil {
+		user := filepath.Base(home)
+		prefix := "Users-" + user + "-"
+		if strings.HasPrefix(name, prefix) {
+			name = name[len(prefix):]
+		}
 	}
 	if name == "" {
 		return "(root)"
