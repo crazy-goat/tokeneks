@@ -216,9 +216,10 @@ func piSessions(days int, date string) ([]piSession, error) {
 			}
 
 			if date != "" {
-				if len(fileEntry.Name()) < 10 || fileEntry.Name()[:10] != date {
-					continue
-				}
+			fdate, ok := fileDateFromFilename(fileEntry.Name())
+			if !ok || fdate != date {
+				continue
+			}
 			} else {
 				if info.ModTime().Before(cutoff) {
 					continue
@@ -231,13 +232,13 @@ func piSessions(days int, date string) ([]piSession, error) {
 			}
 
 			project := cleanProjectName(dirEntry.Name())
-			fileDate := fileEntry.Name()[:10]
+			fileDate, _ := fileDateFromFilename(fileEntry.Name())
 			title := data.Title
 			if title == "" {
 				title = project
 			}
 			sessionBase := strings.TrimSuffix(fileEntry.Name(), ".jsonl")
-			sessionID := strings.TrimSuffix(strings.SplitN(fileEntry.Name(), "_", 2)[1], ".jsonl")
+			sessionID, _ := piSessionIDFromFilename(fileEntry.Name())
 			childCount := piSubsessionCount(filepath.Join(projectDir, sessionBase), cutoff, date)
 
 			sessions = append(sessions, piSession{
@@ -437,7 +438,10 @@ func piDetail(input string) error {
 	dirName := filepath.Base(filepath.Dir(fp))
 	project := cleanProjectName(dirName)
 	if sessionID == "" {
-		sessionID = strings.TrimSuffix(strings.SplitN(filepath.Base(fp), "_", 2)[1], ".jsonl")
+		sessionID, _ = piSessionIDFromFilename(filepath.Base(fp))
+		if sessionID == "" {
+			sessionID = strings.TrimSuffix(filepath.Base(fp), ".jsonl")
+		}
 	}
 
 	fmt.Printf("Session:  %s\n", sessionID)

@@ -119,3 +119,56 @@ func TestOpenOCDB_ReturnsSameInstance(t *testing.T) {
 		ocDBMu.Unlock()
 	})
 }
+
+func TestPISessionIDFromFilename_DoesNotPanic(t *testing.T) {
+	tests := []struct {
+		name    string
+		want    string
+		wantErr bool
+	}{
+		{"2025-01-15_abc123.jsonl", "abc123", false},
+		{"short.jsonl", "", true},
+		{"no_underscore.jsonl", "", true},
+		{"2025-01-15_.jsonl", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := piSessionIDFromFilename(tc.name)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("piSessionIDFromFilename(%q) expected error, got %q", tc.name, got)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("piSessionIDFromFilename(%q) unexpected error: %v", tc.name, err)
+				}
+				if got != tc.want {
+					t.Errorf("piSessionIDFromFilename(%q) = %q, want %q", tc.name, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestFileDateFromFilename(t *testing.T) {
+	tests := []struct {
+		name  string
+		date  string
+		ok    bool
+	}{
+		{"2025-01-15_abc123.jsonl", "2025-01-15", true},
+		{"short.jsonl", "", false},
+		{"2025-01-15_abc123.jsonl", "2025-01-15", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := fileDateFromFilename(tc.name)
+			if ok != tc.ok {
+				t.Errorf("fileDateFromFilename(%q) ok=%v, want %v", tc.name, ok, tc.ok)
+			}
+			if got != tc.date {
+				t.Errorf("fileDateFromFilename(%q) = %q, want %q", tc.name, got, tc.date)
+			}
+		})
+	}
+}
