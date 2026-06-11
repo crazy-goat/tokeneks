@@ -112,6 +112,12 @@ func fillSessionStats(d *SessionDetail) {
 	modelStatsMap := make(map[string]*ModelStats)
 
 	var firstTs, lastTs time.Time
+	type durAccum struct {
+		total int64
+		max   int64
+		count int
+	}
+	durByTool := make(map[string]*durAccum)
 	for i, s := range d.Steps {
 		totalInput += s.Input
 		totalOutput += s.Output
@@ -141,6 +147,18 @@ func fillSessionStats(d *SessionDetail) {
 		for _, tc := range s.ToolCalls {
 			if tc.Error {
 				toolErrs++
+			}
+			if tc.DurationMs > 0 {
+				a, ok := durByTool[tc.Name]
+				if !ok {
+					a = &durAccum{}
+					durByTool[tc.Name] = a
+				}
+				a.total += tc.DurationMs
+				a.count++
+				if tc.DurationMs > a.max {
+					a.max = tc.DurationMs
+				}
 			}
 		}
 		if s.Thinking != "" {
@@ -212,28 +230,6 @@ func fillSessionStats(d *SessionDetail) {
 		d.MaxResponseLen = respMax
 	}
 	// aggregate tool durations
-	type durAccum struct {
-		total int64
-		max   int64
-		count int
-	}
-	durByTool := make(map[string]*durAccum)
-	for _, s := range d.Steps {
-		for _, tc := range s.ToolCalls {
-			if tc.DurationMs > 0 {
-				a, ok := durByTool[tc.Name]
-				if !ok {
-					a = &durAccum{}
-					durByTool[tc.Name] = a
-				}
-				a.total += tc.DurationMs
-				a.count++
-				if tc.DurationMs > a.max {
-					a.max = tc.DurationMs
-				}
-			}
-		}
-	}
 	if len(durByTool) > 0 {
 		toolDurs := make([]ToolDurationStat, 0, len(durByTool))
 		for name, a := range durByTool {
