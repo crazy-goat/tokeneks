@@ -239,15 +239,8 @@ func ocList(days int, date string) error {
 	}
 
 	fmt.Println(strings.Repeat("-", separatorWidthOpenCode))
-	totalOverpay := max(totalActual-totalIdeal, 0)
-	pct := 0.0
-	if totalIdeal > 0 {
-		pct = totalOverpay / totalIdeal * 100
-	}
-
 	totalTokens := totalIn + totalCR + totalOut
-	totalCostPer1M := perMillion(totalActual, totalTokens)
-	totalIdealPer1M := perMillion(totalIdeal, totalTokens)
+	totalOverpay, pct, totalCostPer1M, totalIdealPer1M := footerTotals(totalActual, totalIdeal, totalTokens)
 
 	fmt.Printf("%19s  %-18s  %-27s  %-30s  %5s  %7s  %6.2f  %6.2f  %8.2f  %6.1f%%  %7.2f  %7.2f\n",
 		"TOTAL", "", "", "", "", formatTokens(totalTokens), totalActual, totalIdeal, totalOverpay, pct, totalCostPer1M, totalIdealPer1M)

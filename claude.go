@@ -467,15 +467,8 @@ func claudeList(days int, date string) error {
 	}
 
 	fmt.Println(strings.Repeat("-", separatorWidthClaudeMix))
-	totalOverpay := max(totalActual-totalIdeal, 0)
-	pct := float64(0)
-	if totalIdeal > 0 {
-		pct = totalOverpay / totalIdeal * 100
-	}
-
 	totalTokens := totalIn + totalCC + totalCR + totalOut
-	totalCostPer1M := perMillion(totalActual, totalTokens)
-	totalIdealPer1M := perMillion(totalIdeal, totalTokens)
+	totalOverpay, pct, totalCostPer1M, totalIdealPer1M := footerTotals(totalActual, totalIdeal, totalTokens)
 
 	fmt.Printf("%19s  %-36s  %-14s  %-25s  %4s  %8s  %8.2f  %7.2f  %10.2f  %6.1f%%  %8.2f  %8.2f\n",
 		"TOTAL", "", "", "", "", formatTokens(totalTokens), totalActual, totalIdeal, totalOverpay, pct, totalCostPer1M, totalIdealPer1M)

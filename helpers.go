@@ -180,6 +180,16 @@ func perMillion(cost float64, tokens int) float64 {
 	return cost / float64(tokens) * tokensPerMillion
 }
 
+func footerTotals(totalActual, totalIdeal float64, totalTokens int) (totalOverpay, pct, totalCostPer1M, totalIdealPer1M float64) {
+	totalOverpay = max(totalActual-totalIdeal, 0)
+	if totalIdeal > 0 {
+		pct = totalOverpay / totalIdeal * 100
+	}
+	totalCostPer1M = perMillion(totalActual, totalTokens)
+	totalIdealPer1M = perMillion(totalIdeal, totalTokens)
+	return
+}
+
 func formatTokens(n int) string {
 	if n >= tokensPerMillion {
 		return fmt.Sprintf("%.1fM", float64(n)/tokensPerMillion)

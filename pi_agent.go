@@ -455,14 +455,7 @@ func piDetail(input string, days int) error {
 		}
 	}
 
-	totalOverpay := totalActual - totalIdeal
-	if totalOverpay < 0 {
-		totalOverpay = 0
-	}
-	pctIdeal := 0.0
-	if totalIdeal > 0 {
-		pctIdeal = totalOverpay / totalIdeal * 100
-	}
+	totalOverpay, pctIdeal, _, _ := footerTotals(totalActual, totalIdeal, 0)
 
 	fmt.Printf("\nTOTAL\n")
 	fmt.Printf("Actual paid:  $%.2f\n", totalActual)
@@ -549,15 +542,8 @@ func piList(days int, date string) error {
 	}
 
 	fmt.Println(strings.Repeat("-", separatorWidthPi))
-	totalOverpay := max(totalActual-totalIdeal, 0)
-	pct := 0.0
-	if totalIdeal > 0 {
-		pct = totalOverpay / totalIdeal * 100
-	}
-
 	totalTokens := totalIn + totalCR + totalOut
-	totalCostPer1M := perMillion(totalActual, totalTokens)
-	totalIdealPer1M := perMillion(totalIdeal, totalTokens)
+	totalOverpay, pct, totalCostPer1M, totalIdealPer1M := footerTotals(totalActual, totalIdeal, totalTokens)
 
 	fmt.Printf("%19s  %-36s  %-18s  %4s  %7s  %6.2f  %6.2f  %8.2f  %6.1f%%  %7.2f  %7.2f\n",
 		"TOTAL", "", "", "", formatTokens(totalTokens), totalActual, totalIdeal, totalOverpay, pct, totalCostPer1M, totalIdealPer1M)
