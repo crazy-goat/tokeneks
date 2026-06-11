@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"tokeneks/compute"
 )
 
 const defaultPISessions = "~/.pi/agent/sessions"
@@ -47,12 +48,12 @@ type piMessageEntry struct {
 
 type piSessionStep struct {
 	Model string
-	Step  StepData
+	Step  compute.StepData
 	Cost  float64 // actual cost from session data
 }
 
-func (s piSessionStep) modelKey() string   { return s.Model }
-func (s piSessionStep) stepData() StepData { return s.Step }
+func (s piSessionStep) modelKey() string           { return s.Model }
+func (s piSessionStep) stepData() compute.StepData { return s.Step }
 
 type piSessionData struct {
 	DominantModel  string
@@ -127,7 +128,7 @@ func piSessionUsage(fp string) (piSessionData, error) {
 			continue
 		}
 
-		step := StepData{
+		step := compute.StepData{
 			Input:         entry.Message.Usage.Input,
 			CacheCreation: entry.Message.Usage.CacheWrite,
 			CacheRead:     entry.Message.Usage.CacheRead,
@@ -145,12 +146,12 @@ func piSessionUsage(fp string) (piSessionData, error) {
 	return data, scanner.Err()
 }
 
-func piMessages(fp string) ([]StepData, error) {
+func piMessages(fp string) ([]compute.StepData, error) {
 	data, err := piSessionUsage(fp)
 	if err != nil {
 		return nil, err
 	}
-	steps := make([]StepData, 0, len(data.Steps))
+	steps := make([]compute.StepData, 0, len(data.Steps))
 	for _, step := range data.Steps {
 		steps = append(steps, step.Step)
 	}
@@ -444,18 +445,18 @@ func piDetail(input string, days int) error {
 		fmt.Printf("=== %s (%d messages) ===\n\n", model, len(steps))
 
 		if !prices.SupportsCacheCreation {
-			rows := ComputeIdeal(steps)
+			rows := compute.ComputeIdeal(steps)
 			printDetailRows(rows, prices, false)
-			s := Summarize(rows, prices)
+			s := compute.Summarize(rows, prices)
 			totalActual += s.Actual
 			totalIdeal += s.Ideal
 			fmt.Printf("\nSubtotal actual: $%.2f\n", s.Actual)
 			fmt.Printf("Subtotal ideal:  $%.2f\n", s.Ideal)
 			fmt.Printf("Subtotal overpay: $%.2f (%.1f%% of ideal)\n", s.Overpay, s.PctIdeal)
 		} else {
-			rows := ComputeIdealClaude(steps, prices)
+			rows := compute.ComputeIdealClaude(steps, prices)
 			printDetailRowsClaude(rows, prices)
-			s := SummarizeClaude(rows, prices)
+			s := compute.SummarizeClaude(rows, prices)
 			totalActual += s.Actual
 			totalIdeal += s.Ideal
 			fmt.Printf("\nSubtotal actual: $%.2f\n", s.Actual)
@@ -496,12 +497,12 @@ func piList(days int, date string) error {
 
 		byModel := groupStepsByModel(data.Steps)
 
-		var s Summary
+		var s compute.Summary
 		for model, steps := range byModel {
 			prices := globalPrices[model]
 			if !prices.SupportsCacheCreation {
-				rows := ComputeIdeal(steps)
-				part := Summarize(rows, prices)
+				rows := compute.ComputeIdeal(steps)
+				part := compute.Summarize(rows, prices)
 				s.TotalCR += part.TotalCR
 				s.TotalIn += part.TotalIn
 				s.TotalOut += part.TotalOut
@@ -511,8 +512,8 @@ func piList(days int, date string) error {
 				s.Actual += part.Actual
 				s.Ideal += part.Ideal
 			} else {
-				rows := ComputeIdealClaude(steps, prices)
-				part := SummarizeClaude(rows, prices)
+				rows := compute.ComputeIdealClaude(steps, prices)
+				part := compute.SummarizeClaude(rows, prices)
 				s.TotalCR += part.TotalCR
 				s.TotalIn += part.TotalIn
 				s.TotalOut += part.TotalOut
@@ -540,8 +541,8 @@ func piList(days int, date string) error {
 		timestamp := sess.Birth.UTC().Format("2006-01-02 15:04:05")
 
 		tokens := s.TotalIn + s.TotalCR + s.TotalOut
-		costPer1M := perMillion(s.Actual, tokens)
-		idealPer1M := perMillion(s.Ideal, tokens)
+		costPer1M := compute.PerMillion(s.Actual, tokens)
+		idealPer1M := compute.PerMillion(s.Ideal, tokens)
 
 		fmt.Printf("%19s  %-36s  %-18.18s  %4d  %7s  %6.2f  %6.2f  %8.2f  %6.1f%%  %7.2f  %7.2f\n",
 			timestamp, sess.ID, sess.DominantModel, sess.Msgs, formatTokens(tokens), s.Actual, s.Ideal, s.Overpay, s.PctIdeal, costPer1M, idealPer1M)

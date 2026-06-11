@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"tokeneks/compute"
 
 	"github.com/spf13/cobra"
 )
@@ -119,8 +120,8 @@ func printTotal(days int) error {
 		if err != nil || len(steps) == 0 {
 			continue
 		}
-		rows := ComputeIdeal(steps)
-		s := Summarize(rows, kimi)
+		rows := compute.ComputeIdeal(steps)
+		s := compute.Summarize(rows, kimi)
 		piActual += s.Actual
 		piIdeal += s.Ideal
 	}

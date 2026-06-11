@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"sync"
+
+	"tokeneks/compute"
 )
 
 const defaultPIModels = "~/.pi/agent/models.json"
@@ -25,12 +27,12 @@ type piModelsFile struct {
 
 var (
 	piModelPricesOnce sync.Once
-	piModelPricesMap  map[string]ModelPrices
+	piModelPricesMap  map[string]compute.ModelPrices
 )
 
-func piGlobalModelPrices() map[string]ModelPrices {
+func piGlobalModelPrices() map[string]compute.ModelPrices {
 	piModelPricesOnce.Do(func() {
-		piModelPricesMap = make(map[string]ModelPrices)
+		piModelPricesMap = make(map[string]compute.ModelPrices)
 
 		modelsBytes, err := os.ReadFile(expandHome(defaultPIModels))
 		if err != nil {
@@ -44,7 +46,7 @@ func piGlobalModelPrices() map[string]ModelPrices {
 
 		for _, provider := range modelsFile.Providers {
 			for _, model := range provider.Models {
-				prices := ModelPrices{
+				prices := compute.ModelPrices{
 					Input:                 model.Cost.Input,
 					Output:                model.Cost.Output,
 					CacheRead:             model.Cost.CacheRead,
@@ -62,11 +64,4 @@ func piGlobalModelPrices() map[string]ModelPrices {
 	})
 
 	return piModelPricesMap
-}
-
-func piStepActualCost(step StepData, prices ModelPrices) float64 {
-	return float64(step.Input)*prices.Input/tokensPerMillion +
-		float64(step.CacheCreation)*prices.CacheCreation/tokensPerMillion +
-		float64(step.CacheRead)*prices.CacheRead/tokensPerMillion +
-		float64(step.Output)*prices.Output/tokensPerMillion
 }

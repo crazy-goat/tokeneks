@@ -5,11 +5,12 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"tokeneks/compute"
 )
 
 const defaultDB = "~/.local/share/opencode/opencode.db"
 
-func ocSteps(sessionID string) ([]StepData, error) {
+func ocSteps(sessionID string) ([]compute.StepData, error) {
 	db, err := openOCDB()
 	if err != nil {
 		return nil, err
@@ -30,9 +31,9 @@ func ocSteps(sessionID string) ([]StepData, error) {
 	}
 	defer rows.Close()
 
-	var steps []StepData
+	var steps []compute.StepData
 	for rows.Next() {
-		var s StepData
+		var s compute.StepData
 		if err := rows.Scan(&s.Input, &s.CacheRead, &s.Output); err != nil {
 			return nil, err
 		}
@@ -41,7 +42,7 @@ func ocSteps(sessionID string) ([]StepData, error) {
 	return steps, rows.Err()
 }
 
-func ocStepsBatch(ids []string) (map[string][]StepData, error) {
+func ocStepsBatch(ids []string) (map[string][]compute.StepData, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -76,10 +77,10 @@ func ocStepsBatch(ids []string) (map[string][]StepData, error) {
 	}
 	defer rows.Close()
 
-	result := make(map[string][]StepData)
+	result := make(map[string][]compute.StepData)
 	for rows.Next() {
 		var sessionID string
-		var step StepData
+		var step compute.StepData
 		if err := rows.Scan(&sessionID, &step.Input, &step.CacheRead, &step.Output); err != nil {
 			return nil, err
 		}
@@ -88,12 +89,12 @@ func ocStepsBatch(ids []string) (map[string][]StepData, error) {
 	return result, rows.Err()
 }
 
-func ocSessionSummary(steps []StepData, model string) Summary {
+func ocSessionSummary(steps []compute.StepData, model string) compute.Summary {
 	prices := ocModelPrices[model]
 	if prices.Input == 0 {
 		prices = ocModelPrices["Kimi K2.6"]
 	}
-	return Summarize(ComputeIdeal(steps), prices)
+	return compute.Summarize(compute.ComputeIdeal(steps), prices)
 }
 
 func ocToolCalls(sessionID string) (int, error) {
@@ -120,7 +121,7 @@ func ocSessionCost(sessionID, model string) (float64, error) {
 	if prices.Input == 0 {
 		prices = ocModelPrices["Kimi K2.6"]
 	}
-	return Summarize(ComputeIdeal(steps), prices).Actual, nil
+	return compute.Summarize(compute.ComputeIdeal(steps), prices).Actual, nil
 }
 
 type ocSession struct {
@@ -233,10 +234,10 @@ func ocDetail(sessionID string) error {
 	fmt.Printf("Title:   %s\n", title)
 	fmt.Printf("Model:   %s\n\n", model)
 
-	rows := ComputeIdeal(steps)
+	rows := compute.ComputeIdeal(steps)
 	printDetailRows(rows, prices, false)
 
-	s := Summarize(rows, prices)
+	s := compute.Summarize(rows, prices)
 	fmt.Printf("\nActual paid:  $%.2f\n", s.Actual)
 	fmt.Printf("Ideal paid:   $%.2f\n", s.Ideal)
 	fmt.Printf("Overpay:      $%.2f (%.1f%% of ideal)\n", s.Overpay, s.PctIdeal)
@@ -291,8 +292,8 @@ func ocList(days int, date string) error {
 		}
 
 		tokens := summary.TotalIn + summary.TotalCR + summary.TotalOut
-		costPer1M := perMillion(summary.Actual, tokens)
-		idealPer1M := perMillion(summary.Ideal, tokens)
+		costPer1M := compute.PerMillion(summary.Actual, tokens)
+		idealPer1M := compute.PerMillion(summary.Ideal, tokens)
 
 		modelDisplay := sess.Model
 		if sess.Provider != "" {

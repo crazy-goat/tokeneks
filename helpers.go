@@ -12,22 +12,18 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"tokeneks/compute"
 )
 
 const (
 	scannerInitBuf          = 1024 * 1024 // 1 MB initial buffer for JSONL scanner
 	scannerMaxBuf           = 10 * 1024 * 1024
-	tokensPerMillion        = 1_000_000
 	separatorWidthKimi      = 88
 	separatorWidthClaude    = 108
 	separatorWidthOpenCode  = 173
 	separatorWidthPi        = 154
 	separatorWidthClaudeMix = 179
 )
-
-// compactThresholdPct is the compact-display threshold in percent.
-// It is a var (not const) so tests can verify the constant is used.
-var compactThresholdPct = 80
 
 // newJSONLScanner creates a bufio.Scanner with a large buffer suitable for JSONL files.
 // The default 64 KB scanner limit is too small for long JSONL lines.
@@ -173,26 +169,19 @@ func dominantModel(counts map[string]int) string {
 	return best
 }
 
-func perMillion(cost float64, tokens int) float64 {
-	if tokens == 0 {
-		return 0
-	}
-	return cost / float64(tokens) * tokensPerMillion
-}
-
 func footerTotals(totalActual, totalIdeal float64, totalTokens int) (totalOverpay, pct, totalCostPer1M, totalIdealPer1M float64) {
 	totalOverpay = max(totalActual-totalIdeal, 0)
 	if totalIdeal > 0 {
 		pct = totalOverpay / totalIdeal * 100
 	}
-	totalCostPer1M = perMillion(totalActual, totalTokens)
-	totalIdealPer1M = perMillion(totalIdeal, totalTokens)
+	totalCostPer1M = compute.PerMillion(totalActual, totalTokens)
+	totalIdealPer1M = compute.PerMillion(totalIdeal, totalTokens)
 	return
 }
 
 func formatTokens(n int) string {
-	if n >= tokensPerMillion {
-		return fmt.Sprintf("%.1fM", float64(n)/tokensPerMillion)
+	if n >= compute.TokensPerMillion {
+		return fmt.Sprintf("%.1fM", float64(n)/compute.TokensPerMillion)
 	}
 	if n >= 1_000 {
 		return fmt.Sprintf("%.1fk", float64(n)/1e3)
@@ -202,12 +191,12 @@ func formatTokens(n int) string {
 
 type modelStepped interface {
 	modelKey() string
-	stepData() StepData
+	stepData() compute.StepData
 }
 
 // groupStepsByModel groups steps by Model name.
-func groupStepsByModel[T modelStepped](steps []T) map[string][]StepData {
-	byModel := make(map[string][]StepData)
+func groupStepsByModel[T modelStepped](steps []T) map[string][]compute.StepData {
+	byModel := make(map[string][]compute.StepData)
 	for _, s := range steps {
 		key := s.modelKey()
 		byModel[key] = append(byModel[key], s.stepData())

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"tokeneks/compute"
 )
 
 type ToolCallInfo struct {
@@ -842,7 +843,7 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 		idx, exists := msgIndexByID[msg.Message.ID]
 		if !exists {
 			prices := claudeGlobalModelPrices()[msg.Message.Model]
-			cost := piStepActualCost(StepData{Input: u.InputTokens, CacheCreation: u.CacheCreationInputTokens, CacheRead: u.CacheReadInputTokens, Output: u.OutputTokens}, prices)
+			cost := compute.PiStepActualCost(compute.StepData{Input: u.InputTokens, CacheCreation: u.CacheCreationInputTokens, CacheRead: u.CacheReadInputTokens, Output: u.OutputTokens}, prices)
 			steps = append(steps, StepInfo{
 				Step:       len(steps) + 1,
 				Timestamp:  msg.Timestamp,

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"tokeneks/compute"
 )
 
 //go:embed web/index.html
@@ -147,7 +148,7 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 				u.CacheRead += step.Step.CacheRead
 				u.CacheWrite += step.Step.CacheCreation
 				u.Output += step.Step.Output
-				u.Cost += piStepActualCost(step.Step, prices)
+				u.Cost += compute.PiStepActualCost(step.Step, prices)
 				u.Messages++
 			}
 			var models []WebModelUsage
@@ -206,7 +207,7 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 					u.CacheRead += step.Step.CacheRead
 					u.CacheWrite += step.Step.CacheCreation
 					u.Output += step.Step.Output
-					u.Cost += piStepActualCost(step.Step, prices)
+					u.Cost += compute.PiStepActualCost(step.Step, prices)
 					u.Messages++
 				}
 				var childModels []WebModelUsage
@@ -283,7 +284,7 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 			var totalCost float64
 			for _, u := range byModel {
 				prices := claudeGlobalModelPrices()[u.Model]
-				u.Cost = piStepActualCost(StepData{Input: u.Input, CacheCreation: u.CacheWrite, CacheRead: u.CacheRead, Output: u.Output}, prices)
+				u.Cost = compute.PiStepActualCost(compute.StepData{Input: u.Input, CacheCreation: u.CacheWrite, CacheRead: u.CacheRead, Output: u.Output}, prices)
 				totalCost += u.Cost
 				totalInput += u.Input
 				totalPromptInput += u.Input + u.CacheWrite

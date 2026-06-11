@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"tokeneks/compute"
 )
 
 const defaultClaudeSessions = "~/.claude/projects"
@@ -16,7 +17,7 @@ const defaultClaudePricing = "~/.tokeneks/claude_models.json"
 
 var (
 	claudePricesOnce sync.Once
-	claudePrices     map[string]ModelPrices
+	claudePrices     map[string]compute.ModelPrices
 )
 
 type claudePricesFile map[string]struct {
@@ -26,15 +27,15 @@ type claudePricesFile map[string]struct {
 	Output        float64 `json:"output"`
 }
 
-func claudeGlobalModelPrices() map[string]ModelPrices {
+func claudeGlobalModelPrices() map[string]compute.ModelPrices {
 	claudePricesOnce.Do(func() {
 		claudePrices = initClaudePrices()
 	})
 	return claudePrices
 }
 
-func initClaudePrices() map[string]ModelPrices {
-	prices := map[string]ModelPrices{
+func initClaudePrices() map[string]compute.ModelPrices {
+	prices := map[string]compute.ModelPrices{
 		"claude-opus-4-7": {
 			Input:                 5.5,
 			CacheCreation:         6.75,
@@ -69,7 +70,7 @@ func initClaudePrices() map[string]ModelPrices {
 	}
 
 	for model, p := range file {
-		prices[model] = ModelPrices{
+		prices[model] = compute.ModelPrices{
 			Input:                 p.Input,
 			CacheCreation:         p.CacheCreation,
 			CacheRead:             p.CacheRead,
@@ -101,11 +102,11 @@ type claudeMessage struct {
 
 type claudeSessionStep struct {
 	Model string
-	Step  StepData
+	Step  compute.StepData
 }
 
-func (s claudeSessionStep) modelKey() string   { return s.Model }
-func (s claudeSessionStep) stepData() StepData { return s.Step }
+func (s claudeSessionStep) modelKey() string           { return s.Model }
+func (s claudeSessionStep) stepData() compute.StepData { return s.Step }
 
 type claudeMessageResult struct {
 	Steps          []claudeSessionStep
@@ -157,7 +158,7 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 		models = append(models, msg.Message.Model)
 		steps = append(steps, claudeSessionStep{
 			Model: msg.Message.Model,
-			Step: StepData{
+			Step: compute.StepData{
 				Input:         msg.Message.Usage.InputTokens,
 				CacheCreation: msg.Message.Usage.CacheCreationInputTokens,
 				CacheRead:     msg.Message.Usage.CacheReadInputTokens,
@@ -353,9 +354,9 @@ func claudeDetail(input string) error {
 			fmt.Println()
 		}
 		fmt.Printf("=== %s (%d messages) ===\n\n", model, len(byModel[model]))
-		rows := ComputeIdealClaude(byModel[model], prices)
+		rows := compute.ComputeIdealClaude(byModel[model], prices)
 		printDetailRows(rows, prices, true)
-		s := SummarizeClaude(rows, prices)
+		s := compute.SummarizeClaude(rows, prices)
 		totalActual += s.Actual
 		totalIdeal += s.Ideal
 		fmt.Printf("\nSubtotal actual: $%.2f\n", s.Actual)
@@ -412,11 +413,11 @@ func claudeList(days int, date string) error {
 			continue
 		}
 
-		var s ClaudeSummary
+		var s compute.Summary
 		for model, modelSteps := range byModel {
 			prices := claudeGlobalModelPrices()[model]
-			rows := ComputeIdealClaude(modelSteps, prices)
-			part := SummarizeClaude(rows, prices)
+			rows := compute.ComputeIdealClaude(modelSteps, prices)
+			part := compute.SummarizeClaude(rows, prices)
 			s.TotalCC += part.TotalCC
 			s.TotalCR += part.TotalCR
 			s.TotalIn += part.TotalIn
@@ -457,8 +458,8 @@ func claudeList(days int, date string) error {
 		}
 
 		tokens := s.TotalIn + s.TotalCC + s.TotalCR + s.TotalOut
-		costPer1M := perMillion(s.Actual, tokens)
-		idealPer1M := perMillion(s.Ideal, tokens)
+		costPer1M := compute.PerMillion(s.Actual, tokens)
+		idealPer1M := compute.PerMillion(s.Ideal, tokens)
 
 		fmt.Printf("%19s  %-36s  %-14s  %-25s  %4d  %8s  %8.2f  %7.2f  %10.2f  %6.1f%%  %8.2f  %8.2f\n",
 			timestamp, sess.ID, modelShort, project, sess.Msgs, formatTokens(tokens), s.Actual, s.Ideal, s.Overpay, s.PctIdeal, costPer1M, idealPer1M)

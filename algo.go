@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	"tokeneks/compute"
 )
 
 // Prices per 1M tokens
@@ -13,7 +15,7 @@ const (
 )
 
 // OpenCode model prices
-var ocModelPrices = map[string]ModelPrices{
+var ocModelPrices = map[string]compute.ModelPrices{
 	"Kimi K2.6": {
 		Input:     0.95,
 		CacheRead: 0.16,
@@ -26,162 +28,7 @@ var ocModelPrices = map[string]ModelPrices{
 	},
 }
 
-// ModelPrices holds per-model pricing
-type ModelPrices struct {
-	Input                 float64
-	Output                float64
-	CacheRead             float64
-	CacheCreation         float64
-	SupportsCacheCreation bool
-}
-
-// Add CacheCreation to StepData
-type StepData struct {
-	Input         int
-	CacheCreation int // 0 for Kimi, populated for Claude
-	CacheRead     int
-	Output        int
-}
-
-// IdealRow holds computed ideal values per step.
-type IdealRow struct {
-	Input         int
-	CacheCreation int
-	CacheRead     int
-	Output        int
-	IdealCR       int
-	IdealCC       int
-	IdealIn       int
-	Waste         int
-	IsCompact     bool
-}
-
-func (r IdealRow) Note() string {
-	if r.IsCompact {
-		return "COMPACT"
-	}
-	if r.Waste == 0 {
-		return "HIT"
-	}
-	if r.CacheRead > 1000 {
-		return "PARTIAL"
-	}
-	return "MISS"
-}
-
-// Backwards-compatible aliases for existing call sites.
-type ClaudeIdealRow = IdealRow
-
-type ClaudeSummary = Summary
-
-// Summary holds aggregated totals.
-type Summary struct {
-	TotalCC      int
-	TotalCR      int
-	TotalIn      int
-	TotalOut     int
-	TotalIdealCR int
-	TotalIdealCC int
-	TotalIdealIn int
-	TotalWaste   int
-	Actual       float64
-	Ideal        float64
-	Overpay      float64
-	PctIdeal     float64
-}
-
-func Summarize(rows []IdealRow, prices ModelPrices) Summary {
-	var s Summary
-	for _, r := range rows {
-		s.TotalCC += r.CacheCreation
-		s.TotalCR += r.CacheRead
-		s.TotalIn += r.Input
-		s.TotalOut += r.Output
-		s.TotalIdealCR += r.IdealCR
-		s.TotalIdealCC += r.IdealCC
-		s.TotalIdealIn += r.IdealIn
-		s.TotalWaste += r.Waste
-	}
-	step := StepData{Input: s.TotalIn, CacheCreation: s.TotalCC, CacheRead: s.TotalCR, Output: s.TotalOut}
-	idealStep := StepData{Input: s.TotalIdealIn, CacheCreation: s.TotalIdealCC, CacheRead: s.TotalIdealCR, Output: s.TotalOut}
-	s.Actual = piStepActualCost(step, prices)
-	s.Ideal = piStepActualCost(idealStep, prices)
-	s.Overpay = s.Actual - s.Ideal
-	if s.Overpay < 0 {
-		s.Overpay = 0
-	}
-	if s.Ideal > 0 {
-		s.PctIdeal = s.Overpay / s.Ideal * 100
-	}
-	return s
-}
-
-func SummarizeClaude(rows []ClaudeIdealRow, prices ModelPrices) ClaudeSummary {
-	return Summarize(rows, prices)
-}
-
-func ComputeIdealClaude(steps []StepData, prices ModelPrices) []ClaudeIdealRow {
-	idealCR := 0
-	rows := make([]ClaudeIdealRow, len(steps))
-
-	for i, s := range steps {
-		totalCtx := s.Input + s.CacheCreation + s.CacheRead
-
-		isCompact := false
-		if i > 0 {
-			prevTotal := steps[i-1].Input + steps[i-1].CacheCreation + steps[i-1].CacheRead
-			if totalCtx < prevTotal*compactThresholdPct/100 {
-				isCompact = true
-				idealCR = s.CacheRead
-			}
-		} else if idealCR > totalCtx {
-			idealCR = totalCtx
-		}
-
-		// Ideal cache read = min(ideal context, total context)
-		if idealCR > totalCtx {
-			idealCR = totalCtx
-		}
-
-		newTokens := totalCtx - idealCR
-		if newTokens < 0 {
-			newTokens = 0
-		}
-
-		idealCC := 0
-		idealIn := newTokens
-		if s.CacheCreation > 0 {
-			// In ideal scenario: new tokens are cache_creation (written for next step reuse)
-			// Regular input is 0 (everything cacheable)
-			idealCC = newTokens
-			idealIn = 0
-		}
-
-		// Waste = what should have been cache_read but wasn't (or was input/CC)
-		waste := idealCR - s.CacheRead
-		if waste < 0 {
-			waste = 0
-		}
-
-		rows[i] = IdealRow{
-			Input:         s.Input,
-			CacheCreation: s.CacheCreation,
-			CacheRead:     s.CacheRead,
-			Output:        s.Output,
-			IdealCR:       idealCR,
-			IdealCC:       idealCC,
-			IdealIn:       idealIn,
-			Waste:         waste,
-			IsCompact:     isCompact,
-		}
-
-		idealCR = idealCR + idealCC + s.Output
-	}
-
-	return rows
-}
-
-func printDetailRows(rows []IdealRow, prices ModelPrices, showCC bool) {
+func printDetailRows(rows []compute.IdealRow, prices compute.ModelPrices, showCC bool) {
 	if showCC {
 		fmt.Printf("%4s  %7s  %7s  %7s  %6s  │  %8s  %8s  %6s  │  %7s  %8s\n",
 			"Step", "c.read", "c.write", "input", "output", "i_cr", "i_cc", "out", "waste", "note")
@@ -195,18 +42,18 @@ func printDetailRows(rows []IdealRow, prices ModelPrices, showCC bool) {
 		}
 
 		fmt.Println(strings.Repeat("-", separatorWidthClaude))
-		s := SummarizeClaude(rows, prices)
+		s := compute.SummarizeClaude(rows, prices)
 		fmt.Printf("%4s  %7d  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d\n",
 			"SUM", s.TotalCR, s.TotalCC, s.TotalIn, s.TotalOut,
 			s.TotalIdealCR, s.TotalIdealCC, s.TotalOut,
 			s.TotalWaste)
 		fmt.Printf("%4s  %7.2f  %7.2f  %7.2f  %6.2f  │  %8.2f  %8.2f  %6.2f  │  %7.2f\n",
 			"$",
-			float64(s.TotalCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalCC)*prices.CacheCreation/tokensPerMillion,
-			float64(s.TotalIn)*prices.Input/tokensPerMillion, float64(s.TotalOut)*prices.Output/tokensPerMillion,
-			float64(s.TotalIdealCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalIdealCC)*prices.CacheCreation/tokensPerMillion,
-			float64(s.TotalOut)*prices.Output/tokensPerMillion,
-			float64(s.TotalWaste)*(prices.Input-prices.CacheRead)/tokensPerMillion)
+			float64(s.TotalCR)*prices.CacheRead/compute.TokensPerMillion, float64(s.TotalCC)*prices.CacheCreation/compute.TokensPerMillion,
+			float64(s.TotalIn)*prices.Input/compute.TokensPerMillion, float64(s.TotalOut)*prices.Output/compute.TokensPerMillion,
+			float64(s.TotalIdealCR)*prices.CacheRead/compute.TokensPerMillion, float64(s.TotalIdealCC)*prices.CacheCreation/compute.TokensPerMillion,
+			float64(s.TotalOut)*prices.Output/compute.TokensPerMillion,
+			float64(s.TotalWaste)*(prices.Input-prices.CacheRead)/compute.TokensPerMillion)
 		return
 	}
 
@@ -222,71 +69,18 @@ func printDetailRows(rows []IdealRow, prices ModelPrices, showCC bool) {
 	}
 
 	fmt.Println(strings.Repeat("-", separatorWidthKimi))
-	s := Summarize(rows, prices)
+	s := compute.Summarize(rows, prices)
 	fmt.Printf("%4s  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d\n",
 		"SUM", s.TotalCR, s.TotalIn, s.TotalOut,
 		s.TotalIdealCR, s.TotalIdealIn, s.TotalOut,
 		s.TotalWaste)
 	fmt.Printf("%4s  %7.2f  %7.2f  %6.2f  │  %8.2f  %8.2f  %6.2f  │  %7.2f\n",
 		"$",
-		float64(s.TotalCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalIn)*prices.Input/tokensPerMillion, float64(s.TotalOut)*prices.Output/tokensPerMillion,
-		float64(s.TotalIdealCR)*prices.CacheRead/tokensPerMillion, float64(s.TotalIdealIn)*prices.Input/tokensPerMillion, float64(s.TotalOut)*prices.Output/tokensPerMillion,
-		float64(s.TotalWaste)*(prices.Input-prices.CacheRead)/tokensPerMillion)
+		float64(s.TotalCR)*prices.CacheRead/compute.TokensPerMillion, float64(s.TotalIn)*prices.Input/compute.TokensPerMillion, float64(s.TotalOut)*prices.Output/compute.TokensPerMillion,
+		float64(s.TotalIdealCR)*prices.CacheRead/compute.TokensPerMillion, float64(s.TotalIdealIn)*prices.Input/compute.TokensPerMillion, float64(s.TotalOut)*prices.Output/compute.TokensPerMillion,
+		float64(s.TotalWaste)*(prices.Input-prices.CacheRead)/compute.TokensPerMillion)
 }
 
-func printDetailRowsClaude(rows []IdealRow, prices ModelPrices) {
+func printDetailRowsClaude(rows []compute.IdealRow, prices compute.ModelPrices) {
 	printDetailRows(rows, prices, true)
-}
-
-// ComputeIdeal calculates ideal cache_read and waste per step (original for Kimi K2.6)
-func ComputeIdeal(steps []StepData) []IdealRow {
-	idealCR := 0
-	rows := make([]IdealRow, len(steps))
-
-	for i, s := range steps {
-		totalCtx := s.Input + s.CacheRead
-
-		isCompact := false
-		if i > 0 {
-			prevTotal := steps[i-1].Input + steps[i-1].CacheRead
-			if totalCtx < prevTotal*compactThresholdPct/100 {
-				isCompact = true
-				idealCR = s.CacheRead
-			}
-		} else if idealCR > totalCtx {
-			idealCR = totalCtx
-		}
-
-		if idealCR > totalCtx {
-			idealCR = totalCtx
-		}
-
-		newTokens := totalCtx - idealCR
-		if newTokens < 0 {
-			newTokens = 0
-		}
-
-		idealIn := newTokens
-
-		waste := idealCR - s.CacheRead
-		if waste < 0 {
-			waste = 0
-		}
-
-		rows[i] = IdealRow{
-			Input:         s.Input,
-			CacheCreation: s.CacheCreation,
-			CacheRead:     s.CacheRead,
-			Output:        s.Output,
-			IdealIn:       idealIn,
-			IdealCR:       idealCR,
-			IdealCC:       0,
-			Waste:         waste,
-			IsCompact:     isCompact,
-		}
-
-		idealCR = idealCR + s.Output
-	}
-
-	return rows
 }
