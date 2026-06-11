@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"time"
@@ -49,7 +50,9 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 
 	// OpenCode
 	ocSess, err := ocSessions(days, "")
-	if err == nil {
+	if err != nil {
+		log.Printf("web aggregator: OpenCode sessions load failed: %v", err)
+	} else {
 		for _, sess := range ocSess {
 			usage := WebModelUsage{
 				Model:     sess.Model,
@@ -89,7 +92,9 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 
 	// PI
 	piSess, err := piSessions(days, "")
-	if err == nil {
+	if err != nil {
+		log.Printf("web aggregator: PI sessions load failed: %v", err)
+	} else {
 		for _, sess := range piSess {
 			data, err := piSessionUsage(sess.Filepath)
 			if err != nil || len(data.Steps) == 0 {
@@ -216,7 +221,9 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 
 	// Claude
 	clSess, err := claudeSessions(days, "", "")
-	if err == nil {
+	if err != nil {
+		log.Printf("web aggregator: Claude sessions load failed: %v", err)
+	} else {
 		for _, sess := range clSess {
 			res, err := claudeMessages(sess.Filepath)
 			if err != nil || len(res.Steps) == 0 {
