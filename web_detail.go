@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -261,7 +262,8 @@ func fillSessionStats(d *SessionDetail) {
 func handleAPISessionDetail(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			http.Error(w, fmt.Sprintf("panic: %v", rec), http.StatusInternalServerError)
+			log.Printf("panic in handleAPISessionDetail: %v", rec)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}
 	}()
 	path := strings.TrimPrefix(r.URL.Path, "/api/session/")
