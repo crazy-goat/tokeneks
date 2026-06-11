@@ -199,3 +199,18 @@ func formatTokens(n int) string {
 	}
 	return fmt.Sprintf("%d", n)
 }
+
+type modelStepped interface {
+	modelKey() string
+	stepData() StepData
+}
+
+// groupStepsByModel groups steps by Model name.
+func groupStepsByModel[T modelStepped](steps []T) map[string][]StepData {
+	byModel := make(map[string][]StepData)
+	for _, s := range steps {
+		key := s.modelKey()
+		byModel[key] = append(byModel[key], s.stepData())
+	}
+	return byModel
+}

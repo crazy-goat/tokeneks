@@ -100,6 +100,9 @@ type claudeSessionStep struct {
 	Step  StepData
 }
 
+func (s claudeSessionStep) modelKey() string   { return s.Model }
+func (s claudeSessionStep) stepData() StepData { return s.Step }
+
 type claudeMessageResult struct {
 	Steps          []claudeSessionStep
 	Models         []string
@@ -334,10 +337,7 @@ func claudeDetail(input string) error {
 	fmt.Printf("Messages: %d\n", len(res.Steps))
 	fmt.Printf("ToolCalls: %d\n\n", res.ToolCalls)
 
-	byModel := make(map[string][]StepData)
-	for _, step := range res.Steps {
-		byModel[step.Model] = append(byModel[step.Model], step.Step)
-	}
+	byModel := groupStepsByModel(res.Steps)
 
 	modelNames := make([]string, 0, len(byModel))
 	for model := range byModel {
@@ -401,16 +401,16 @@ func claudeList(days int, date string) error {
 			continue
 		}
 
-		byModel := make(map[string][]StepData)
-		for _, step := range res.Steps {
-			prices := claudeGlobalModelPrices()[step.Model]
+		byModel := groupStepsByModel(res.Steps)
+		valid := true
+		for model := range byModel {
+			prices := claudeGlobalModelPrices()[model]
 			if prices.Input == 0 {
-				byModel = nil
+				valid = false
 				break
 			}
-			byModel[step.Model] = append(byModel[step.Model], step.Step)
 		}
-		if byModel == nil {
+		if !valid {
 			continue
 		}
 

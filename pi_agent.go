@@ -51,6 +51,9 @@ type piSessionStep struct {
 	Cost  float64 // actual cost from session data
 }
 
+func (s piSessionStep) modelKey() string   { return s.Model }
+func (s piSessionStep) stepData() StepData { return s.Step }
+
 type piSessionData struct {
 	DominantModel  string
 	Title          string
@@ -413,10 +416,7 @@ func piDetail(input string, days int) error {
 	fmt.Printf("Model:    %s\n\n", data.DominantModel)
 
 	globalPrices := piGlobalModelPrices()
-	byModel := make(map[string][]StepData)
-	for _, step := range data.Steps {
-		byModel[step.Model] = append(byModel[step.Model], step.Step)
-	}
+	byModel := groupStepsByModel(data.Steps)
 
 	models := make([]string, 0, len(byModel))
 	for model := range byModel {
@@ -485,10 +485,7 @@ func piList(days int, date string) error {
 			continue
 		}
 
-		byModel := make(map[string][]StepData)
-		for _, step := range data.Steps {
-			byModel[step.Model] = append(byModel[step.Model], step.Step)
-		}
+		byModel := groupStepsByModel(data.Steps)
 
 		var s Summary
 		for model, steps := range byModel {
