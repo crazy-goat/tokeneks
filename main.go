@@ -10,6 +10,28 @@ import (
 var days int
 var dateFilter string
 
+func registerAgentCommands(root *cobra.Command, agent Agent, listShort, detailUse, detailShort string) {
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: listShort,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return agent.List(days, dateFilter)
+		},
+	}
+	listCmd.Flags().StringVarP(&dateFilter, "date", "D", "", "filter by specific date (YYYY-MM-DD)")
+
+	detailCmd := &cobra.Command{
+		Use:   detailUse,
+		Short: detailShort,
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return agent.Detail(args[0], days)
+		},
+	}
+
+	root.AddCommand(listCmd, detailCmd)
+}
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "tokeneks",
@@ -18,85 +40,23 @@ func main() {
 
 	rootCmd.PersistentFlags().IntVarP(&days, "days", "d", 7, "number of days to analyze")
 
-	// oc list
 	ocCmd := &cobra.Command{
 		Use:   "oc",
 		Short: "OpenCode sessions",
 	}
+	registerAgentCommands(ocCmd, agents["oc"], "List all Kimi K2.6 sessions with summary", "detail <session-id>", "Per-step analysis for a specific session")
 
-	ocListCmd := &cobra.Command{
-		Use:   "list",
-		Short: "List all Kimi K2.6 sessions with summary",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return ocList(days, dateFilter)
-		},
-	}
-	ocListCmd.Flags().StringVarP(&dateFilter, "date", "D", "", "filter by specific date (YYYY-MM-DD)")
-
-	// oc detail <session_id>
-	ocDetailCmd := &cobra.Command{
-		Use:   "detail <session-id>",
-		Short: "Per-step analysis for a specific session",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return ocDetail(args[0])
-		},
-	}
-
-	ocCmd.AddCommand(ocListCmd, ocDetailCmd)
-
-	// pi list
 	piCmd := &cobra.Command{
 		Use:   "pi",
 		Short: "PI Agent sessions",
 	}
+	registerAgentCommands(piCmd, agents["pi"], "List all Kimi K2.6 sessions with summary", "detail <session-id|filepath>", "Per-message analysis for a specific PI session")
 
-	piListCmd := &cobra.Command{
-		Use:   "list",
-		Short: "List all Kimi K2.6 sessions with summary",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return piList(days, dateFilter)
-		},
-	}
-	piListCmd.Flags().StringVarP(&dateFilter, "date", "D", "", "filter by specific date (YYYY-MM-DD)")
-
-	// pi detail <session-id|filepath>
-	piDetailCmd := &cobra.Command{
-		Use:   "detail <session-id|filepath>",
-		Short: "Per-message analysis for a specific PI session",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return piDetail(args[0], days)
-		},
-	}
-
-	piCmd.AddCommand(piListCmd, piDetailCmd)
-
-	// claude list
 	claudeCmd := &cobra.Command{
 		Use:   "claude",
 		Short: "Claude Code sessions (Opus 4.7, Sonnet 4.6)",
 	}
-	claudeListCmd := &cobra.Command{
-		Use:   "list",
-		Short: "List Claude Code sessions with cache analysis",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return claudeList(days, dateFilter)
-		},
-	}
-	claudeListCmd.Flags().StringVarP(&dateFilter, "date", "D", "", "filter by specific date (YYYY-MM-DD)")
-
-	// claude detail <session-id|filepath>
-	claudeDetailCmd := &cobra.Command{
-		Use:   "detail <session-id|filepath>",
-		Short: "Per-message analysis for a Claude Code session",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return claudeDetail(args[0])
-		},
-	}
-
-	claudeCmd.AddCommand(claudeListCmd, claudeDetailCmd)
+	registerAgentCommands(claudeCmd, agents["claude"], "List Claude Code sessions with cache analysis", "detail <session-id|filepath>", "Per-message analysis for a Claude Code session")
 
 	// total
 	totalCmd := &cobra.Command{
