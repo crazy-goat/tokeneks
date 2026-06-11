@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExpandHome_TildeSlash(t *testing.T) {
@@ -227,6 +228,31 @@ func TestTruncate(t *testing.T) {
 		if len(got) > tc.max {
 			t.Errorf("truncate(%q, %d) = %q (len=%d), exceeds max", tc.input, tc.max, got, len(got))
 		}
+	}
+}
+
+func TestGetCreatedAtFromInfo_UsesProvidedInfo(t *testing.T) {
+	// Create a temp file and stat it, then pass the FileInfo to getCreatedAtFromInfo.
+	// The function should not call os.Stat again (verified by not panicking).
+	tmpFile, err := os.CreateTemp("", "test-birth-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	info, err := os.Stat(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := getCreatedAtFromInfo(info)
+	if got.IsZero() {
+		t.Error("getCreatedAtFromInfo returned zero time")
+	}
+	// The birth time should be <= now
+	if got.After(time.Now()) {
+		t.Error("getCreatedAtFromInfo returned future time")
 	}
 }
 

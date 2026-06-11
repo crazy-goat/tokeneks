@@ -247,7 +247,7 @@ func claudeSessions(days int, date, modelFilter string) ([]claudeSession, error)
 				DominantModel: dominantModel,
 				Msgs:          len(res.Models),
 				ToolCalls:     res.ToolCalls,
-				Birth:         getCreatedAt(fp),
+				Birth:         getCreatedAtFromInfo(info),
 				LastActivity:  res.LastActivity,
 				SubagentCount: subagentCount,
 			})

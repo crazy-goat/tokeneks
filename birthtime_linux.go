@@ -9,6 +9,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// getCreatedAtFromInfo returns the modification time on Linux.
+// Birth time extraction on Linux requires statx() which needs a path.
+func getCreatedAtFromInfo(info os.FileInfo) time.Time {
+	return info.ModTime()
+}
+
 func getCreatedAt(path string) time.Time {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -22,6 +28,5 @@ func getCreatedAt(path string) time.Time {
 		return time.Unix(int64(stx.Btime.Sec), int64(stx.Btime.Nsec))
 	}
 
-	// Fallback to modification time
 	return info.ModTime()
 }

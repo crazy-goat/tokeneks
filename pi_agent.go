@@ -210,10 +210,10 @@ func piSessions(days int, date string) ([]piSession, error) {
 			}
 
 			if date != "" {
-			fdate, ok := fileDateFromFilename(fileEntry.Name())
-			if !ok || fdate != date {
-				continue
-			}
+				fdate, ok := fileDateFromFilename(fileEntry.Name())
+				if !ok || fdate != date {
+					continue
+				}
 			} else {
 				if info.ModTime().Before(cutoff) {
 					continue
@@ -243,7 +243,7 @@ func piSessions(days int, date string) ([]piSession, error) {
 				Date:          fileDate,
 				Msgs:          len(data.Steps),
 				ToolCalls:     data.ToolCalls,
-				Birth:         getCreatedAt(fp),
+				Birth:         getCreatedAtFromInfo(info),
 				LastActivity:  data.LastActivity,
 				DominantModel: data.DominantModel,
 				ChildCount:    childCount,
