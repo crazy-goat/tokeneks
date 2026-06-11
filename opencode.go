@@ -56,6 +56,18 @@ func ocToolCalls(sessionID string) (int, error) {
 	return count, err
 }
 
+func ocSessionCost(sessionID, model string) (float64, error) {
+	steps, err := ocSteps(sessionID)
+	if err != nil {
+		return 0, err
+	}
+	prices := ocModelPrices[model]
+	if prices.Input == 0 {
+		prices = ocModelPrices["Kimi K2.6"]
+	}
+	return Summarize(ComputeIdeal(steps), prices).Actual, nil
+}
+
 type ocSession struct {
 	ID               string
 	Title            string
@@ -84,7 +96,7 @@ func ocSessions(days int, date string) ([]ocSession, error) {
 	if date != "" {
 		query = `
 			SELECT s.id, s.title, json_extract(s.model, '$.id'), ifnull(json_extract(s.model, '$.providerID'),''), s.time_created, ifnull(MAX(p.time_created), s.time_created), count(*) as steps,
-				s.cost, ifnull(s.tokens_input,0), ifnull(s.tokens_output,0), ifnull(s.tokens_cache_read,0), ifnull(s.tokens_cache_write,0), ifnull(s.parent_id, '')
+				ifnull(s.tokens_input,0), ifnull(s.tokens_output,0), ifnull(s.tokens_cache_read,0), ifnull(s.tokens_cache_write,0), ifnull(s.parent_id, '')
 			FROM session s
 			JOIN part p ON p.session_id = s.id
 			WHERE json_extract(p.data, '$.type') = 'step-finish'
@@ -97,7 +109,7 @@ func ocSessions(days int, date string) ([]ocSession, error) {
 		cutoff := fmt.Sprintf("-%d days", days)
 		query = `
 			SELECT s.id, s.title, json_extract(s.model, '$.id'), ifnull(json_extract(s.model, '$.providerID'),''), s.time_created, ifnull(MAX(p.time_created), s.time_created), count(*) as steps,
-				s.cost, ifnull(s.tokens_input,0), ifnull(s.tokens_output,0), ifnull(s.tokens_cache_read,0), ifnull(s.tokens_cache_write,0), ifnull(s.parent_id, '')
+				ifnull(s.tokens_input,0), ifnull(s.tokens_output,0), ifnull(s.tokens_cache_read,0), ifnull(s.tokens_cache_write,0), ifnull(s.parent_id, '')
 			FROM session s
 			JOIN part p ON p.session_id = s.id
 			WHERE json_extract(p.data, '$.type') = 'step-finish'
@@ -118,9 +130,14 @@ func ocSessions(days int, date string) ([]ocSession, error) {
 	for rows.Next() {
 		var s ocSession
 		if err := rows.Scan(&s.ID, &s.Title, &s.Model, &s.Provider, &s.CreatedAt, &s.LastActivity, &s.Steps,
-			&s.Cost, &s.TokensInput, &s.TokensOutput, &s.TokensCacheRead, &s.TokensCacheWrite, &s.ParentID); err != nil {
+			&s.TokensInput, &s.TokensOutput, &s.TokensCacheRead, &s.TokensCacheWrite, &s.ParentID); err != nil {
 			return nil, err
 		}
+		cost, err := ocSessionCost(s.ID, s.Model)
+		if err != nil {
+			return nil, err
+		}
+		s.Cost = cost
 		sessions = append(sessions, s)
 	}
 	return sessions, nil
