@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -173,10 +174,13 @@ func ocList(days int, date string) error {
 		"DateTime", "DominantModel", "Session", "Title", "Steps", "Tokens", "Paid", "Ideal", "Overpay", "%ideal", "$/1M", "i$/1M")
 	fmt.Println(strings.Repeat("-", separatorWidthOpenCode))
 
+	defaultPrices := ocModelPrices["Kimi K2.6"]
+
 	var totalActual, totalIdeal float64
 	var totalIn, totalCR, totalOut int
 
 	modelSet := make(map[string]struct{})
+	unpricedModels := make(map[string]struct{})
 	for _, sess := range sessions {
 		steps, err := ocSteps(sess.ID)
 		if err != nil {
@@ -186,7 +190,8 @@ func ocList(days int, date string) error {
 
 		prices := ocModelPrices[sess.Model]
 		if prices.Input == 0 {
-			continue
+			prices = defaultPrices
+			unpricedModels[sess.Model] = struct{}{}
 		}
 		modelSet[sess.Model] = struct{}{}
 
@@ -243,8 +248,20 @@ func ocList(days int, date string) error {
 		"TOTAL", "", "", "", "", formatTokens(totalTokens), totalActual, totalIdeal, totalOverpay, pct, totalCostPer1M, totalIdealPer1M)
 	fmt.Println()
 
+	if len(unpricedModels) > 0 {
+		models := make([]string, 0, len(unpricedModels))
+		for m := range unpricedModels {
+			models = append(models, m)
+		}
+		sort.Strings(models)
+		fmt.Printf("WARNING: using Kimi K2.6 default pricing for unpriced model(s): %s\n", strings.Join(models, ", "))
+	}
+
 	for m := range modelSet {
 		p := ocModelPrices[m]
+		if p.Input == 0 {
+			p = defaultPrices
+		}
 		fmt.Printf("%s: Input=$%.2f/M  CacheRead=$%.3f/M  Output=$%.2f/M\n", m, p.Input, p.CacheRead, p.Output)
 	}
 
