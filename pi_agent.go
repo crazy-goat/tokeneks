@@ -375,7 +375,7 @@ func cleanProjectName(dirName string) string {
 	return strings.ReplaceAll(name, "-", "/")
 }
 
-func resolvePISessionPath(input string) (string, string, error) {
+func resolvePISessionPath(input string, days int) (string, string, error) {
 	if strings.HasSuffix(input, ".jsonl") || strings.Contains(input, "/") {
 		return input, "", nil
 	}
@@ -415,8 +415,8 @@ func resolvePISessionPath(input string) (string, string, error) {
 	return childMatches[0], input, nil
 }
 
-func piDetail(input string) error {
-	fp, sessionID, err := resolvePISessionPath(input)
+func piDetail(input string, days int) error {
+	fp, sessionID, err := resolvePISessionPath(input, days)
 	if err != nil {
 		return err
 	}

@@ -66,7 +66,7 @@ func main() {
 		Short: "Per-message analysis for a specific PI session",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return piDetail(args[0])
+			return piDetail(args[0], days)
 		},
 	}
 

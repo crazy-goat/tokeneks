@@ -276,7 +276,7 @@ func handleAPISessionDetail(w http.ResponseWriter, r *http.Request) {
 	case "OpenCode":
 		detail, err = ocSessionDetail(id)
 	case "PI":
-		fp, _, err2 := resolvePISessionPath(id)
+		fp, _, err2 := resolvePISessionPath(id, 365*10)
 		if err2 != nil {
 			http.Error(w, err2.Error(), http.StatusNotFound)
 			return
