@@ -129,6 +129,18 @@ func truncate(s string, max int) string {
 	return s[:max-3] + "..."
 }
 
+func dominantModel(counts map[string]int) string {
+	var best string
+	var bestN int
+	for model, n := range counts {
+		if n > bestN || (n == bestN && (best == "" || model < best)) {
+			best = model
+			bestN = n
+		}
+	}
+	return best
+}
+
 func perMillion(cost float64, tokens int) float64 {
 	if tokens == 0 {
 		return 0

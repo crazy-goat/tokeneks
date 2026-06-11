@@ -229,14 +229,7 @@ func claudeSessions(days int, date, modelFilter string) ([]claudeSession, error)
 			for _, m := range res.Models {
 				modelCount[m]++
 			}
-			var dominantModel string
-			var maxCount int
-			for m, c := range modelCount {
-				if c > maxCount || (c == maxCount && (dominantModel == "" || m < dominantModel)) {
-					maxCount = c
-					dominantModel = m
-				}
-			}
+			primaryModel := dominantModel(modelCount)
 
 			sessionID := strings.TrimSuffix(fileEntry.Name(), ".jsonl")
 			project := cleanClaudeProjectName(dirEntry.Name())
@@ -255,7 +248,7 @@ func claudeSessions(days int, date, modelFilter string) ([]claudeSession, error)
 				Filepath:      fp,
 				Project:       project,
 				Date:          fileDate,
-				DominantModel: dominantModel,
+				DominantModel: primaryModel,
 				Msgs:          len(res.Models),
 				ToolCalls:     res.ToolCalls,
 				Birth:         getCreatedAtFromInfo(info),
@@ -349,14 +342,7 @@ func claudeDetail(input string) error {
 	for _, m := range res.Models {
 		modelCount[m]++
 	}
-	var primaryModel string
-	var maxCount int
-	for m, c := range modelCount {
-		if c > maxCount || (c == maxCount && (primaryModel == "" || m < primaryModel)) {
-			maxCount = c
-			primaryModel = m
-		}
-	}
+	primaryModel := dominantModel(modelCount)
 	prices := claudeGlobalModelPrices()[primaryModel]
 	if prices.Input == 0 {
 		return fmt.Errorf("no prices configured for model %s", primaryModel)

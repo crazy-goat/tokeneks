@@ -39,6 +39,20 @@ func TestExpandHome_NoTilde(t *testing.T) {
 	}
 }
 
+func TestDominantModel_MostFrequent(t *testing.T) {
+	got := dominantModel(map[string]int{"gpt-4": 2, "gpt-3.5": 5, "claude": 1})
+	if got != "gpt-3.5" {
+		t.Errorf("dominantModel(most frequent) = %q, want %q", got, "gpt-3.5")
+	}
+}
+
+func TestDominantModel_TieBreakLexicographic(t *testing.T) {
+	got := dominantModel(map[string]int{"zeta": 3, "alpha": 3, "beta": 1})
+	if got != "alpha" {
+		t.Errorf("dominantModel(tie break) = %q, want %q", got, "alpha")
+	}
+}
+
 func TestPerMillion_ZeroTokens(t *testing.T) {
 	got := perMillion(1.0, 0)
 	if got != 0.0 {

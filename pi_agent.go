@@ -137,13 +137,7 @@ func piSessionUsage(fp string) (piSessionData, error) {
 		modelCounts[entry.Message.Model]++
 	}
 
-	maxCount := 0
-	for model, count := range modelCounts {
-		if count > maxCount || (count == maxCount && (data.DominantModel == "" || model < data.DominantModel)) {
-			maxCount = count
-			data.DominantModel = model
-		}
-	}
+	data.DominantModel = dominantModel(modelCounts)
 
 	return data, scanner.Err()
 }
