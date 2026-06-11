@@ -50,14 +50,6 @@ func max(a, b float64) float64 {
 	return b
 }
 
-func repeatByte(b byte, n int) []byte {
-	bs := make([]byte, n)
-	for i := range bs {
-		bs[i] = b
-	}
-	return bs
-}
-
 func formatTokens(n int) string {
 	if n >= 1_000_000 {
 		return fmt.Sprintf("%.1fM", float64(n)/1e6)

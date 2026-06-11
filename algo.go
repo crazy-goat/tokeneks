@@ -197,14 +197,10 @@ func SummarizeClaude(rows []ClaudeIdealRow, prices ModelPrices) ClaudeSummary {
 		s.TotalIdealIn += r.IdealIn
 		s.TotalWaste += r.Waste
 	}
-	s.Actual = float64(s.TotalIn)*prices.Input/1e6 +
-		float64(s.TotalCC)*prices.CacheCreation/1e6 +
-		float64(s.TotalCR)*prices.CacheRead/1e6 +
-		float64(s.TotalOut)*prices.Output/1e6
-	s.Ideal = float64(s.TotalIdealIn)*prices.Input/1e6 +
-		float64(s.TotalIdealCC)*prices.CacheCreation/1e6 +
-		float64(s.TotalIdealCR)*prices.CacheRead/1e6 +
-		float64(s.TotalOut)*prices.Output/1e6
+	step := StepData{Input: s.TotalIn, CacheCreation: s.TotalCC, CacheRead: s.TotalCR, Output: s.TotalOut}
+	idealStep := StepData{Input: s.TotalIdealIn, CacheCreation: s.TotalIdealCC, CacheRead: s.TotalIdealCR, Output: s.TotalOut}
+	s.Actual = piStepActualCost(step, prices)
+	s.Ideal = piStepActualCost(idealStep, prices)
 	s.Overpay = s.Actual - s.Ideal
 	if s.Overpay < 0 {
 		s.Overpay = 0
@@ -225,8 +221,10 @@ func Summarize(rows []IdealRow, prices ModelPrices) Summary {
 		s.TotalIdealIn += r.IdealIn
 		s.TotalWaste += r.Waste
 	}
-	s.Actual = float64(s.TotalIn)*prices.Input/1e6 + float64(s.TotalCR)*prices.CacheRead/1e6 + float64(s.TotalOut)*prices.Output/1e6
-	s.Ideal = float64(s.TotalIdealIn)*prices.Input/1e6 + float64(s.TotalIdealCR)*prices.CacheRead/1e6 + float64(s.TotalOut)*prices.Output/1e6
+	step := StepData{Input: s.TotalIn, CacheRead: s.TotalCR, Output: s.TotalOut}
+	idealStep := StepData{Input: s.TotalIdealIn, CacheRead: s.TotalIdealCR, Output: s.TotalOut}
+	s.Actual = piStepActualCost(step, prices)
+	s.Ideal = piStepActualCost(idealStep, prices)
 	s.Overpay = s.Actual - s.Ideal
 	if s.Overpay < 0 {
 		s.Overpay = 0
