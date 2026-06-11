@@ -36,22 +36,25 @@ func claudeGlobalModelPrices() map[string]ModelPrices {
 func initClaudePrices() map[string]ModelPrices {
 	prices := map[string]ModelPrices{
 		"claude-opus-4-7": {
-			Input:         5.5,
-			CacheCreation: 6.75,
-			CacheRead:     0.55,
-			Output:        27.5,
+			Input:                 5.5,
+			CacheCreation:         6.75,
+			CacheRead:             0.55,
+			Output:                27.5,
+			SupportsCacheCreation: true,
 		},
 		"claude-opus-4-8": {
-			Input:         5.5,
-			CacheCreation: 6.75,
-			CacheRead:     0.55,
-			Output:        27.5,
+			Input:                 5.5,
+			CacheCreation:         6.75,
+			CacheRead:             0.55,
+			Output:                27.5,
+			SupportsCacheCreation: true,
 		},
 		"claude-sonnet-4-6": {
-			Input:         3.0,
-			CacheCreation: 3.75,
-			CacheRead:     0.3,
-			Output:        15.0,
+			Input:                 3.0,
+			CacheCreation:         3.75,
+			CacheRead:             0.3,
+			Output:                15.0,
+			SupportsCacheCreation: true,
 		},
 	}
 
@@ -67,10 +70,11 @@ func initClaudePrices() map[string]ModelPrices {
 
 	for model, p := range file {
 		prices[model] = ModelPrices{
-			Input:         p.Input,
-			CacheCreation: p.CacheCreation,
-			CacheRead:     p.CacheRead,
-			Output:        p.Output,
+			Input:                 p.Input,
+			CacheCreation:         p.CacheCreation,
+			CacheRead:             p.CacheRead,
+			Output:                p.Output,
+			SupportsCacheCreation: p.CacheCreation > 0,
 		}
 	}
 	return prices

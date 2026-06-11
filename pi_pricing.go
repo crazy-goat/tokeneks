@@ -45,10 +45,11 @@ func piGlobalModelPrices() map[string]ModelPrices {
 		for _, provider := range modelsFile.Providers {
 			for _, model := range provider.Models {
 				prices := ModelPrices{
-					Input:         model.Cost.Input,
-					CacheCreation: model.Cost.CacheWrite,
-					CacheRead:     model.Cost.CacheRead,
-					Output:        model.Cost.Output,
+					Input:                 model.Cost.Input,
+					Output:                model.Cost.Output,
+					CacheRead:             model.Cost.CacheRead,
+					CacheCreation:         model.Cost.CacheWrite,
+					SupportsCacheCreation: model.Cost.CacheWrite > 0,
 				}
 				if model.ID != "" {
 					piModelPricesMap[model.ID] = prices

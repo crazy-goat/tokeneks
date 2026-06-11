@@ -28,10 +28,11 @@ var ocModelPrices = map[string]ModelPrices{
 
 // ModelPrices holds per-model pricing
 type ModelPrices struct {
-	Input         float64
-	CacheCreation float64
-	CacheRead     float64
-	Output        float64
+	Input                 float64
+	Output                float64
+	CacheRead             float64
+	CacheCreation         float64
+	SupportsCacheCreation bool
 }
 
 // Add CacheCreation to StepData

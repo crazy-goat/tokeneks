@@ -434,7 +434,7 @@ func piDetail(input string, days int) error {
 		}
 		fmt.Printf("=== %s (%d messages) ===\n\n", model, len(steps))
 
-		if prices.CacheCreation == 0 {
+		if !prices.SupportsCacheCreation {
 			rows := ComputeIdeal(steps)
 			printDetailRows(rows, prices, false)
 			s := Summarize(rows, prices)
@@ -490,7 +490,7 @@ func piList(days int, date string) error {
 		var s Summary
 		for model, steps := range byModel {
 			prices := globalPrices[model]
-			if prices.CacheCreation == 0 {
+			if !prices.SupportsCacheCreation {
 				rows := ComputeIdeal(steps)
 				part := Summarize(rows, prices)
 				s.TotalCR += part.TotalCR
