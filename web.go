@@ -107,11 +107,12 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 					byModel[step.Model] = &WebModelUsage{Model: step.Model, Provider: provider}
 				}
 				u := byModel[step.Model]
+				prices := piGlobalModelPrices()[step.Model]
 				u.Input += step.Step.Input
 				u.CacheRead += step.Step.CacheRead
 				u.CacheWrite += step.Step.CacheCreation
 				u.Output += step.Step.Output
-				u.Cost += step.Cost
+				u.Cost += piStepActualCost(step.Step, prices)
 				u.Messages++
 			}
 			var models []WebModelUsage
@@ -165,11 +166,12 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 						childByModel[step.Model] = &WebModelUsage{Model: step.Model, Provider: provider}
 					}
 					u := childByModel[step.Model]
+					prices := piGlobalModelPrices()[step.Model]
 					u.Input += step.Step.Input
 					u.CacheRead += step.Step.CacheRead
 					u.CacheWrite += step.Step.CacheCreation
 					u.Output += step.Step.Output
-					u.Cost += step.Cost
+					u.Cost += piStepActualCost(step.Step, prices)
 					u.Messages++
 				}
 				var childModels []WebModelUsage
