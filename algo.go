@@ -238,7 +238,7 @@ func Summarize(rows []IdealRow, prices ModelPrices) Summary {
 func printDetailRowsClaude(rows []ClaudeIdealRow, prices ModelPrices) {
 	fmt.Printf("%4s  %7s  %7s  %7s  %6s  │  %8s  %8s  %8s  %6s  │  %7s  %8s\n",
 		"Step", "c.read", "c.write", "input", "output", "i_cr", "i_cc", "i_in", "out", "waste", "note")
-	fmt.Println(string(strings.Repeat("-", 108)))
+	fmt.Println(strings.Repeat("-", 108))
 
 	for i, r := range rows {
 		fmt.Printf("%4d  %7d  %7d  %7d  %6d  │  %8d  %8d  %8d  %6d  │  %7d  %8s\n",
@@ -247,7 +247,7 @@ func printDetailRowsClaude(rows []ClaudeIdealRow, prices ModelPrices) {
 			r.Waste, r.Note())
 	}
 
-	fmt.Println(string(strings.Repeat("-", 108)))
+	fmt.Println(strings.Repeat("-", 108))
 	s := SummarizeClaude(rows, prices)
 	fmt.Printf("%4s  %7d  %7d  %7d  %6d  │  %8d  %8d  %8d  %6d  │  %7d\n",
 		"SUM", s.TotalCR, s.TotalCC, s.TotalIn, s.TotalOut,
@@ -316,7 +316,7 @@ func ComputeIdeal(steps []StepData) []IdealRow {
 func printDetailRows(rows []IdealRow, prices ModelPrices) {
 	fmt.Printf("%4s  %7s  %7s  %6s  │  %8s  %8s  %6s  │  %7s  %8s\n",
 		"Step", "c.read", "input", "output", "i_cr", "i_in", "out", "waste", "note")
-	fmt.Println(string(strings.Repeat("-", 88)))
+	fmt.Println(strings.Repeat("-", 88))
 
 	for i, r := range rows {
 		fmt.Printf("%4d  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d  %8s\n",
@@ -325,7 +325,7 @@ func printDetailRows(rows []IdealRow, prices ModelPrices) {
 			r.Waste, r.Note())
 	}
 
-	fmt.Println(string(strings.Repeat("-", 88)))
+	fmt.Println(strings.Repeat("-", 88))
 	s := Summarize(rows, prices)
 	fmt.Printf("%4s  %7d  %7d  %6d  │  %8d  %8d  %6d  │  %7d\n",
 		"SUM", s.TotalCR, s.TotalIn, s.TotalOut,
