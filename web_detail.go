@@ -344,7 +344,7 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 	defer rows.Close()
 
 	var steps []StepInfo
-	var current *StepInfo
+	curIdx := -1
 	var totalCost float64
 	var pendingText, pendingThinking string
 	var lastUserPrompt string
@@ -439,10 +439,10 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 			pendingText = ""
 			pendingThinking = ""
 			steps = append(steps, s)
-			current = &steps[len(steps)-1]
+			curIdx = len(steps) - 1
 			totalCost += part.Cost
 		case "tool":
-			if current != nil {
+			if curIdx >= 0 {
 				var out json.RawMessage
 				if b, err := json.Marshal(part.State.Output); err == nil {
 					out = json.RawMessage(b)
@@ -464,7 +464,7 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 				if part.Time.Start > 0 && part.Time.End > 0 {
 					tc.DurationMs = (part.Time.End - part.Time.Start) / int64(time.Millisecond)
 				}
-				current.ToolCalls = append(current.ToolCalls, tc)
+				steps[curIdx].ToolCalls = append(steps[curIdx].ToolCalls, tc)
 			}
 		}
 	}
