@@ -128,8 +128,8 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 		log.Printf("web aggregator: PI sessions load failed: %v", err)
 	} else {
 		for _, sess := range piSess {
-			data, err := piSessionUsage(sess.Filepath)
-			if err != nil || len(data.Steps) == 0 {
+			data := sess.Data
+			if data == nil || len(data.Steps) == 0 {
 				continue
 			}
 			byModel := make(map[string]*WebModelUsage)
@@ -259,8 +259,8 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 		log.Printf("web aggregator: Claude sessions load failed: %v", err)
 	} else {
 		for _, sess := range clSess {
-			res, err := claudeMessages(sess.Filepath)
-			if err != nil || len(res.Steps) == 0 {
+			res := sess.Data
+			if res == nil || len(res.Steps) == 0 {
 				continue
 			}
 			byModel := make(map[string]*WebModelUsage)

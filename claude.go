@@ -179,6 +179,7 @@ type claudeSession struct {
 	Birth         time.Time
 	LastActivity  time.Time
 	SubagentCount int
+	Data          *claudeMessageResult
 }
 
 func claudeSessions(days int, date, modelFilter string) ([]claudeSession, error) {
@@ -238,6 +239,7 @@ func claudeSessions(days int, date, modelFilter string) ([]claudeSession, error)
 			Birth:         getCreatedAtFromInfo(info),
 			LastActivity:  res.LastActivity,
 			SubagentCount: subagentCount,
+			Data:          &res,
 		})
 		return nil
 	}); err != nil {
@@ -392,8 +394,8 @@ func claudeList(days int, date string) error {
 	var totalIn, totalCC, totalCR, totalOut int
 
 	for _, sess := range sessions {
-		res, err := claudeMessages(sess.Filepath)
-		if err != nil || len(res.Steps) == 0 {
+		res := sess.Data
+		if res == nil || len(res.Steps) == 0 {
 			continue
 		}
 

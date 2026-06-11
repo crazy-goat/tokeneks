@@ -171,6 +171,7 @@ type piSession struct {
 	ParentID      string
 	ChildCount    int
 	IsSubsession  bool
+	Data          *piSessionData
 }
 
 func piSessions(days int, date string) ([]piSession, error) {
@@ -217,6 +218,7 @@ func piSessions(days int, date string) ([]piSession, error) {
 			LastActivity:  data.LastActivity,
 			DominantModel: data.DominantModel,
 			ChildCount:    childCount,
+			Data:          &data,
 		})
 		return nil
 	}); err != nil {
@@ -487,8 +489,8 @@ func piList(days int, date string) error {
 
 	globalPrices := piGlobalModelPrices()
 	for _, sess := range sessions {
-		data, err := piSessionUsage(sess.Filepath)
-		if err != nil || len(data.Steps) == 0 {
+		data := sess.Data
+		if data == nil || len(data.Steps) == 0 {
 			continue
 		}
 
