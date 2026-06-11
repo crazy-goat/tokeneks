@@ -179,6 +179,44 @@ func TestPISessionIDFromFilename_DoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestWalkSessionFiles_SkipsNonJSONL(t *testing.T) {
+	sessionsDir := t.TempDir()
+	subdir := filepath.Join(sessionsDir, "subdirA")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("os.MkdirAll() = %v", err)
+	}
+
+	validPath := filepath.Join(subdir, "valid.jsonl")
+	if err := os.WriteFile(validPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(valid.jsonl) = %v", err)
+	}
+	ignorePath := filepath.Join(subdir, "ignore.txt")
+	if err := os.WriteFile(ignorePath, []byte("ignore me\n"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(ignore.txt) = %v", err)
+	}
+
+	var got []string
+	err := walkSessionFiles(sessionsDir, func(path string, info os.FileInfo) error {
+		got = append(got, path)
+		if path != validPath {
+			t.Errorf("callback got path %q, want %q", path, validPath)
+		}
+		if info.Name() != "valid.jsonl" {
+			t.Errorf("callback got file %q, want valid.jsonl", info.Name())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walkSessionFiles() = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("walkSessionFiles() called callback %d times, want 1", len(got))
+	}
+	if got[0] != validPath {
+		t.Fatalf("walkSessionFiles() collected %q, want %q", got[0], validPath)
+	}
+}
+
 func TestFileDateFromFilename(t *testing.T) {
 	tests := []struct {
 		name string

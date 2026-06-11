@@ -180,82 +180,61 @@ func claudeSessions(days int, date, modelFilter string) ([]claudeSession, error)
 
 	var sessions []claudeSession
 
-	entries, err := os.ReadDir(baseDir)
-	if err != nil {
+	if err := walkSessionFiles(baseDir, func(fp string, info os.FileInfo) error {
+		if len(filepath.Base(fp)) < 37 { // UUID is 36 chars + .jsonl
+			return nil
+		}
+
+		if date != "" {
+			if info.ModTime().UTC().Format("2006-01-02") != date {
+				return nil
+			}
+		} else if info.ModTime().Before(cutoff) {
+			return nil
+		}
+
+		res, err := claudeMessages(fp)
+		if err != nil || len(res.Models) == 0 {
+			return nil
+		}
+
+		modelCount := make(map[string]int)
+		for _, m := range res.Models {
+			modelCount[m]++
+		}
+		primaryModel := dominantModel(modelCount)
+		if modelFilter != "" && primaryModel != modelFilter {
+			return nil
+		}
+
+		sessionName := filepath.Base(fp)
+		sessionID := strings.TrimSuffix(sessionName, ".jsonl")
+		project := cleanClaudeProjectName(filepath.Base(filepath.Dir(fp)))
+		fileDate := info.ModTime().UTC().Format("2006-01-02")
+		subagentCount := 0
+		if subEntries, err := os.ReadDir(filepath.Join(filepath.Dir(fp), sessionID, "subagents")); err == nil {
+			for _, subEntry := range subEntries {
+				if !subEntry.IsDir() && filepath.Ext(subEntry.Name()) == ".jsonl" {
+					subagentCount++
+				}
+			}
+		}
+
+		sessions = append(sessions, claudeSession{
+			ID:            sessionID,
+			Filepath:      fp,
+			Project:       project,
+			Date:          fileDate,
+			DominantModel: primaryModel,
+			Msgs:          len(res.Models),
+			ToolCalls:     res.ToolCalls,
+			Birth:         getCreatedAtFromInfo(info),
+			LastActivity:  res.LastActivity,
+			SubagentCount: subagentCount,
+		})
+		return nil
+	}); err != nil {
 		return nil, err
-	}
-
-	for _, dirEntry := range entries {
-		if !dirEntry.IsDir() {
-			continue
-		}
-		projectDir := filepath.Join(baseDir, dirEntry.Name())
-
-		files, err := os.ReadDir(projectDir)
-		if err != nil {
-			continue
-		}
-
-		for _, fileEntry := range files {
-			if filepath.Ext(fileEntry.Name()) != ".jsonl" {
-				continue
-			}
-			if len(fileEntry.Name()) < 37 { // UUID is 36 chars + .jsonl
-				continue
-			}
-
-			fp := filepath.Join(projectDir, fileEntry.Name())
-			info, err := os.Stat(fp)
-			if err != nil {
-				continue
-			}
-
-			if date != "" {
-				if info.ModTime().UTC().Format("2006-01-02") != date {
-					continue
-				}
-			} else {
-				if info.ModTime().Before(cutoff) {
-					continue
-				}
-			}
-
-			res, err := claudeMessages(fp)
-			if err != nil || len(res.Models) == 0 {
-				continue
-			}
-
-			modelCount := make(map[string]int)
-			for _, m := range res.Models {
-				modelCount[m]++
-			}
-			primaryModel := dominantModel(modelCount)
-
-			sessionID := strings.TrimSuffix(fileEntry.Name(), ".jsonl")
-			project := cleanClaudeProjectName(dirEntry.Name())
-			fileDate := info.ModTime().UTC().Format("2006-01-02")
-			subagentCount := 0
-			if subEntries, err := os.ReadDir(filepath.Join(projectDir, sessionID, "subagents")); err == nil {
-				for _, subEntry := range subEntries {
-					if !subEntry.IsDir() && filepath.Ext(subEntry.Name()) == ".jsonl" {
-						subagentCount++
-					}
-				}
-			}
-
-			sessions = append(sessions, claudeSession{
-				ID:            sessionID,
-				Filepath:      fp,
-				Project:       project,
-				Date:          fileDate,
-				DominantModel: primaryModel,
-				Msgs:          len(res.Models),
-				ToolCalls:     res.ToolCalls,
-				Birth:         getCreatedAtFromInfo(info),
-				LastActivity:  res.LastActivity,
-				SubagentCount: subagentCount,
-			})
-		}
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {

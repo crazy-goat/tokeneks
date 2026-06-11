@@ -176,73 +176,48 @@ func piSessions(days int, date string) ([]piSession, error) {
 
 	var sessions []piSession
 
-	entries, err := os.ReadDir(baseDir)
-	if err != nil {
+	if err := walkSessionFiles(baseDir, func(fp string, info os.FileInfo) error {
+		if date != "" {
+			fdate, ok := fileDateFromFilename(filepath.Base(fp))
+			if !ok || fdate != date {
+				return nil
+			}
+		} else if info.ModTime().Before(cutoff) {
+			return nil
+		}
+
+		data, err := piSessionUsage(fp)
+		if err != nil || len(data.Steps) == 0 {
+			return nil
+		}
+
+		dirEntry := filepath.Base(filepath.Dir(fp))
+		project := cleanProjectName(dirEntry)
+		title := data.Title
+		if title == "" {
+			title = project
+		}
+		sessionName := filepath.Base(fp)
+		sessionBase := strings.TrimSuffix(sessionName, ".jsonl")
+		sessionID, _ := piSessionIDFromFilename(sessionName)
+		childCount := piSubsessionCount(filepath.Join(filepath.Dir(fp), sessionBase), cutoff, date)
+
+		sessions = append(sessions, piSession{
+			ID:            sessionID,
+			Filepath:      fp,
+			Project:       project,
+			Title:         title,
+			Date:          func() string { d, _ := fileDateFromFilename(sessionName); return d }(),
+			Msgs:          len(data.Steps),
+			ToolCalls:     data.ToolCalls,
+			Birth:         getCreatedAtFromInfo(info),
+			LastActivity:  data.LastActivity,
+			DominantModel: data.DominantModel,
+			ChildCount:    childCount,
+		})
+		return nil
+	}); err != nil {
 		return nil, err
-	}
-
-	for _, dirEntry := range entries {
-		if !dirEntry.IsDir() {
-			continue
-		}
-		projectDir := filepath.Join(baseDir, dirEntry.Name())
-
-		files, err := os.ReadDir(projectDir)
-		if err != nil {
-			continue
-		}
-
-		for _, fileEntry := range files {
-			if filepath.Ext(fileEntry.Name()) != ".jsonl" {
-				continue
-			}
-
-			fp := filepath.Join(projectDir, fileEntry.Name())
-			info, err := os.Stat(fp)
-			if err != nil {
-				continue
-			}
-
-			if date != "" {
-				fdate, ok := fileDateFromFilename(fileEntry.Name())
-				if !ok || fdate != date {
-					continue
-				}
-			} else {
-				if info.ModTime().Before(cutoff) {
-					continue
-				}
-			}
-
-			data, err := piSessionUsage(fp)
-			if err != nil || len(data.Steps) == 0 {
-				continue
-			}
-
-			project := cleanProjectName(dirEntry.Name())
-			fileDate, _ := fileDateFromFilename(fileEntry.Name())
-			title := data.Title
-			if title == "" {
-				title = project
-			}
-			sessionBase := strings.TrimSuffix(fileEntry.Name(), ".jsonl")
-			sessionID, _ := piSessionIDFromFilename(fileEntry.Name())
-			childCount := piSubsessionCount(filepath.Join(projectDir, sessionBase), cutoff, date)
-
-			sessions = append(sessions, piSession{
-				ID:            sessionID,
-				Filepath:      fp,
-				Project:       project,
-				Title:         title,
-				Date:          fileDate,
-				Msgs:          len(data.Steps),
-				ToolCalls:     data.ToolCalls,
-				Birth:         getCreatedAtFromInfo(info),
-				LastActivity:  data.LastActivity,
-				DominantModel: data.DominantModel,
-				ChildCount:    childCount,
-			})
-		}
 	}
 
 	// Sort by file birth time ascending — oldest first, newest last
