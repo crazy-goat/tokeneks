@@ -494,14 +494,8 @@ func claudeList(days int, date string) error {
 		}
 
 		tokens := s.TotalIn + s.TotalCC + s.TotalCR + s.TotalOut
-		costPer1M := 0.0
-		if tokens > 0 {
-			costPer1M = s.Actual / float64(tokens) * tokensPerMillion
-		}
-		idealPer1M := 0.0
-		if tokens > 0 {
-			idealPer1M = s.Ideal / float64(tokens) * tokensPerMillion
-		}
+		costPer1M := perMillion(s.Actual, tokens)
+		idealPer1M := perMillion(s.Ideal, tokens)
 
 		fmt.Printf("%19s  %-36s  %-14s  %-25s  %4d  %8s  %8.2f  %7.2f  %10.2f  %6.1f%%  %8.2f  %8.2f\n",
 			timestamp, sess.ID, modelShort, project, sess.Msgs, formatTokens(tokens), s.Actual, s.Ideal, s.Overpay, s.PctIdeal, costPer1M, idealPer1M)
@@ -515,14 +509,8 @@ func claudeList(days int, date string) error {
 	}
 
 	totalTokens := totalIn + totalCC + totalCR + totalOut
-	totalCostPer1M := 0.0
-	if totalTokens > 0 {
-		totalCostPer1M = totalActual / float64(totalTokens) * tokensPerMillion
-	}
-	totalIdealPer1M := 0.0
-	if totalTokens > 0 {
-		totalIdealPer1M = totalIdeal / float64(totalTokens) * tokensPerMillion
-	}
+	totalCostPer1M := perMillion(totalActual, totalTokens)
+	totalIdealPer1M := perMillion(totalIdeal, totalTokens)
 
 	fmt.Printf("%19s  %-36s  %-14s  %-25s  %4s  %8s  %8.2f  %7.2f  %10.2f  %6.1f%%  %8.2f  %8.2f\n",
 		"TOTAL", "", "", "", "", formatTokens(totalTokens), totalActual, totalIdeal, totalOverpay, pct, totalCostPer1M, totalIdealPer1M)

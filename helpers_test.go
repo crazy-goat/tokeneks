@@ -39,6 +39,20 @@ func TestExpandHome_NoTilde(t *testing.T) {
 	}
 }
 
+func TestPerMillion_ZeroTokens(t *testing.T) {
+	got := perMillion(1.0, 0)
+	if got != 0.0 {
+		t.Errorf("perMillion(1.0, 0) = %v, want 0", got)
+	}
+}
+
+func TestPerMillion_NonZero(t *testing.T) {
+	got := perMillion(1.0, 1_000_000)
+	if got != 1.0 {
+		t.Errorf("perMillion(1.0, 1000000) = %v, want 1", got)
+	}
+}
+
 func TestCleanProjectName_DynamicHome(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -153,9 +167,9 @@ func TestPISessionIDFromFilename_DoesNotPanic(t *testing.T) {
 
 func TestFileDateFromFilename(t *testing.T) {
 	tests := []struct {
-		name  string
-		date  string
-		ok    bool
+		name string
+		date string
+		ok   bool
 	}{
 		{"2025-01-15_abc123.jsonl", "2025-01-15", true},
 		{"short.jsonl", "", false},

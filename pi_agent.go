@@ -572,14 +572,8 @@ func piList(days int, date string) error {
 		timestamp := sess.Birth.UTC().Format("2006-01-02 15:04:05")
 
 		tokens := s.TotalIn + s.TotalCR + s.TotalOut
-		costPer1M := 0.0
-		if tokens > 0 {
-			costPer1M = s.Actual / float64(tokens) * tokensPerMillion
-		}
-		idealPer1M := 0.0
-		if tokens > 0 {
-			idealPer1M = s.Ideal / float64(tokens) * tokensPerMillion
-		}
+		costPer1M := perMillion(s.Actual, tokens)
+		idealPer1M := perMillion(s.Ideal, tokens)
 
 		fmt.Printf("%19s  %-36s  %-18.18s  %4d  %7s  %6.2f  %6.2f  %8.2f  %6.1f%%  %7.2f  %7.2f\n",
 			timestamp, sess.ID, sess.DominantModel, sess.Msgs, formatTokens(tokens), s.Actual, s.Ideal, s.Overpay, s.PctIdeal, costPer1M, idealPer1M)
@@ -593,14 +587,8 @@ func piList(days int, date string) error {
 	}
 
 	totalTokens := totalIn + totalCR + totalOut
-	totalCostPer1M := 0.0
-	if totalTokens > 0 {
-		totalCostPer1M = totalActual / float64(totalTokens) * tokensPerMillion
-	}
-	totalIdealPer1M := 0.0
-	if totalTokens > 0 {
-		totalIdealPer1M = totalIdeal / float64(totalTokens) * tokensPerMillion
-	}
+	totalCostPer1M := perMillion(totalActual, totalTokens)
+	totalIdealPer1M := perMillion(totalIdeal, totalTokens)
 
 	fmt.Printf("%19s  %-36s  %-18s  %4s  %7s  %6.2f  %6.2f  %8.2f  %6.1f%%  %7.2f  %7.2f\n",
 		"TOTAL", "", "", "", formatTokens(totalTokens), totalActual, totalIdeal, totalOverpay, pct, totalCostPer1M, totalIdealPer1M)

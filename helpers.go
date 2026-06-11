@@ -129,6 +129,13 @@ func truncate(s string, max int) string {
 	return s[:max-3] + "..."
 }
 
+func perMillion(cost float64, tokens int) float64 {
+	if tokens == 0 {
+		return 0
+	}
+	return cost / float64(tokens) * tokensPerMillion
+}
+
 func formatTokens(n int) string {
 	if n >= tokensPerMillion {
 		return fmt.Sprintf("%.1fM", float64(n)/tokensPerMillion)
