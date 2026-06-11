@@ -351,39 +351,46 @@ func resolvePISessionPath(input string, days int) (string, string, error) {
 		return input, "", nil
 	}
 
-	sessions, err := piSessions(days, "")
-	if err != nil {
+	baseDir := expandHome(defaultPISessions)
+	cutoff := time.Now().AddDate(0, 0, -days)
+
+	var rootMatch string
+	var childMatch string
+
+	if err := walkSessionFiles(baseDir, func(fp string, info os.FileInfo) error {
+		if days >= 0 && getCreatedAtFromInfo(info).Before(cutoff) {
+			return nil
+		}
+
+		sessionName := filepath.Base(fp)
+		sessionID, err := piSessionIDFromFilename(sessionName)
+		if err != nil {
+			return nil
+		}
+		if rootMatch == "" && sessionID == input {
+			rootMatch = fp
+			return nil
+		}
+		if childMatch == "" {
+			for _, childPath := range piSubsessionPaths(fp) {
+				if piSessionIDFromPath(childPath) == input {
+					childMatch = childPath
+					return nil
+				}
+			}
+		}
+		return nil
+	}); err != nil {
 		return "", "", err
 	}
 
-	var matches []piSession
-	for _, sess := range sessions {
-		if sess.ID == input {
-			matches = append(matches, sess)
-		}
+	if rootMatch != "" {
+		return rootMatch, input, nil
 	}
-	if len(matches) == 1 {
-		return matches[0].Filepath, matches[0].ID, nil
+	if childMatch != "" {
+		return childMatch, input, nil
 	}
-	if len(matches) > 1 {
-		return "", "", fmt.Errorf("multiple PI sessions found for ID %s", input)
-	}
-
-	var childMatches []string
-	for _, sess := range sessions {
-		for _, childPath := range piSubsessionPaths(sess.Filepath) {
-			if piSessionIDFromPath(childPath) == input {
-				childMatches = append(childMatches, childPath)
-			}
-		}
-	}
-	if len(childMatches) == 0 {
-		return "", "", fmt.Errorf("PI session not found: %s", input)
-	}
-	if len(childMatches) > 1 {
-		return "", "", fmt.Errorf("multiple PI sessions found for ID %s", input)
-	}
-	return childMatches[0], input, nil
+	return "", "", fmt.Errorf("PI session not found: %s", input)
 }
 
 func piDetail(input string, days int) error {

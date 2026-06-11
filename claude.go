@@ -277,31 +277,23 @@ func resolveClaudeSessionPath(input string) (string, string, error) {
 	}
 
 	baseDir := expandHome(defaultClaudeSessions)
-	target := input + ".jsonl"
-	var matches []string
+	var match string
 
-	err := filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
+	if err := walkSessionFiles(baseDir, func(fp string, info os.FileInfo) error {
+		if match != "" {
 			return nil
 		}
-		if d.IsDir() {
-			return nil
-		}
-		if filepath.Base(path) == target {
-			matches = append(matches, path)
+		if strings.TrimSuffix(filepath.Base(fp), ".jsonl") == input {
+			match = fp
 		}
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		return "", "", err
 	}
-	if len(matches) == 0 {
+	if match == "" {
 		return "", "", fmt.Errorf("Claude session not found: %s", input)
 	}
-	if len(matches) > 1 {
-		return "", "", fmt.Errorf("multiple Claude sessions found for ID %s", input)
-	}
-	return matches[0], input, nil
+	return match, input, nil
 }
 
 func claudeDetail(input string) error {
