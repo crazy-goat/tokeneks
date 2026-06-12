@@ -4,6 +4,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"hash"
+	"hash/fnv"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -257,6 +260,155 @@ func fillSessionStats(d *SessionDetail) {
 	}
 }
 
+func sessionRequestParts(path, prefix string) (agent, id string, ok bool) {
+	trimmed := strings.TrimPrefix(path, prefix)
+	parts := strings.SplitN(trimmed, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func writeSessionRevisionPart(h hash.Hash64, path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(h, "%s|%d|%d\n", path, info.ModTime().UTC().UnixNano(), info.Size())
+	return nil
+}
+
+func piSessionRevision(fp string) (string, error) {
+	h := fnv.New64a()
+	if err := writeSessionRevisionPart(h, fp); err != nil {
+		return "", err
+	}
+	sessionDir := strings.TrimSuffix(fp, ".jsonl")
+	_ = filepath.WalkDir(sessionDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() || filepath.Ext(path) != ".jsonl" || path == fp {
+			return nil
+		}
+		_ = writeSessionRevisionPart(h, path)
+		return nil
+	})
+	return fmt.Sprintf("%x", h.Sum64()), nil
+}
+
+func claudeSessionRevision(fp string) (string, error) {
+	h := fnv.New64a()
+	if err := writeSessionRevisionPart(h, fp); err != nil {
+		return "", err
+	}
+	sessID := strings.TrimSuffix(filepath.Base(fp), ".jsonl")
+	subDir := filepath.Join(filepath.Dir(fp), sessID, "subagents")
+	_ = filepath.WalkDir(subDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() || filepath.Ext(path) != ".jsonl" {
+			return nil
+		}
+		_ = writeSessionRevisionPart(h, path)
+		return nil
+	})
+	return fmt.Sprintf("%x", h.Sum64()), nil
+}
+
+func ocSessionRevision(sessionID string) (string, error) {
+	db, err := openOCDB()
+	if err != nil {
+		return "", err
+	}
+	var sessionMax, sessionCount, partMax, partCount int64
+	if err := db.QueryRow(`SELECT ifnull(MAX(time_created), 0), COUNT(*) FROM session WHERE id = ? OR parent_id = ?`, sessionID, sessionID).Scan(&sessionMax, &sessionCount); err != nil {
+		return "", err
+	}
+	if err := db.QueryRow(`SELECT ifnull(MAX(time_created), 0), COUNT(*) FROM part WHERE session_id = ? OR session_id IN (SELECT id FROM session WHERE parent_id = ?)`, sessionID, sessionID).Scan(&partMax, &partCount); err != nil {
+		return "", err
+	}
+	h := fnv.New64a()
+	_, _ = fmt.Fprintf(h, "%s|%d|%d|%d|%d", sessionID, sessionMax, sessionCount, partMax, partCount)
+	return fmt.Sprintf("%x", h.Sum64()), nil
+}
+
+func sessionRevision(agent, id string) (string, error) {
+	switch agent {
+	case "OpenCode":
+		return ocSessionRevision(id)
+	case "PI":
+		fp, _, err := resolvePISessionPath(id, 365*10)
+		if err != nil {
+			return "", err
+		}
+		return piSessionRevision(fp)
+	case "Claude":
+		fp, _, err := resolveClaudeSessionPath(id)
+		if err != nil {
+			return "", err
+		}
+		return claudeSessionRevision(fp)
+	default:
+		return "", fmt.Errorf("unknown agent")
+	}
+}
+
+func handleAPISessionStream(w http.ResponseWriter, r *http.Request) {
+	agent, id, ok := sessionRequestParts(r.URL.Path, "/api/session-stream/")
+	if !ok {
+		http.Error(w, "bad path", http.StatusBadRequest)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	revision, err := sessionRevision(agent, id)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if err.Error() == "unknown agent" {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	fmt.Fprintf(w, "event: revision\ndata: %s\n\n", revision)
+	flusher.Flush()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-keepAlive.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+		case <-ticker.C:
+			nextRevision, err := sessionRevision(agent, id)
+			if err != nil {
+				log.Printf("session stream stopped for %s/%s: %v", agent, id, err)
+				return
+			}
+			if nextRevision == revision {
+				continue
+			}
+			revision = nextRevision
+			fmt.Fprintf(w, "event: revision\ndata: %s\n\n", revision)
+			flusher.Flush()
+		}
+	}
+}
+
 func handleAPISessionDetail(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -264,13 +416,11 @@ func handleAPISessionDetail(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}
 	}()
-	path := strings.TrimPrefix(r.URL.Path, "/api/session/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) != 2 {
+	agent, id, ok := sessionRequestParts(r.URL.Path, "/api/session/")
+	if !ok {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
 	}
-	agent, id := parts[0], parts[1]
 	var detail *SessionDetail
 	var err error
 
@@ -298,6 +448,9 @@ func handleAPISessionDetail(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if revision, err := sessionRevision(agent, id); err == nil {
+		w.Header().Set("X-Session-Revision", revision)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")

@@ -153,6 +153,9 @@ let cumChart = null;
 let stepChart = null;
 let loadInFlight = false;
 let lastLoadedAt = null;
+let currentRevision = '';
+let sessionStream = null;
+let openStepKeys = new Set();
 if (!agent || !id) {
   document.body.innerHTML += '<p style="color:red">Missing agent or id param</p>';
   return;
@@ -174,6 +177,133 @@ function formatGap(ms) {
   return `${seconds}s`;
 }
 
+function captureOpenSteps() {
+  openStepKeys = new Set(
+    [...document.querySelectorAll('#steps tr.step-row.open')]
+      .map(row => row.dataset.stepKey)
+      .filter(Boolean)
+  );
+}
+
+function bindStepToggle(row, detailsRow, stepKey) {
+  row.addEventListener('click', () => {
+    row.classList.toggle('open');
+    detailsRow.classList.toggle('open');
+    if (row.classList.contains('open')) openStepKeys.add(stepKey);
+    else openStepKeys.delete(stepKey);
+  });
+}
+
+function buildStepRenderItems(steps) {
+  const items = [];
+  let prevTimestamp = null;
+  let prevCacheRead = null;
+
+  for (const s of steps) {
+    const stepKey = String(s.step);
+    const ts = s.timestamp ? s.timestamp.replace('T',' ').replace(/\.\d+Z?/,'') : '';
+    const toolCount = s.toolCalls ? s.toolCalls.length : 0;
+    const currentTimestamp = s.timestamp ? new Date(s.timestamp) : null;
+    const gapMs = prevTimestamp && currentTimestamp ? currentTimestamp - prevTimestamp : NaN;
+    const isGapWarning = Number.isFinite(gapMs) && gapMs >= 5 * 60 * 1000;
+    const gapLabel = prevTimestamp && currentTimestamp ? formatGap(gapMs) : '–';
+    const gapHtml = isGapWarning
+      ? `<span class="gap-value warn"><span class="gap-alert">!</span>${gapLabel}</span>`
+      : `<span class="gap-value">${gapLabel}</span>`;
+    const hasCacheReadDrop = prevCacheRead !== null && s.cacheRead < prevCacheRead;
+    const rowClass = `step-row${hasCacheReadDrop ? ' non-monotonic' : ''}`;
+    const rowHTML = `
+      <td class="col-step"><span class="badge-step">${s.step}</span></td>
+      <td class="col-model"><span class="model-name">${escHtml(s.model || '–')}</span></td>
+      <td class="col-time"><span class="timestamp">${ts}</span></td>
+      <td class="col-gap">${gapHtml}</td>
+      <td class="col-num">${s.input.toLocaleString()}</td>
+      <td class="col-num">${s.output.toLocaleString()}</td>
+      <td class="col-num">${s.cacheRead.toLocaleString()}</td>
+      <td class="col-num">${s.cacheWrite.toLocaleString()}</td>
+      <td class="col-tools"><span class="tools-count">${toolCount}</span></td>
+      <td class="col-cost"><span class="cost-value">$${s.cost.toFixed(4)}</span></td>
+    `;
+    const detailsHTML = `
+      <td colspan="10">
+        <div class="step-body">
+          ${s.userPrompt ? '<div class="user-block"><div class="label">User prompt</div><div class="user-text">'+escHtml(s.userPrompt)+'</div></div>' : ''}
+          ${s.thinking ? '<div class="think-block"><div class="label">Thinking</div><pre>'+escHtml(s.thinking)+'</pre></div>' : ''}
+          ${s.response ? '<div class="resp-block"><div class="label">Response</div><div class="resp-text">'+escHtml(s.response)+'</div></div>' : ''}
+          ${s.stopReason ? '<div class="stop-reason">Stop: <strong>'+escHtml(s.stopReason)+'</strong></div>' : ''}
+          ${s.toolCalls && s.toolCalls.length ? renderTools(s.toolCalls) : '<div class="no-tools">No tool calls</div>'}
+        </div>
+      </td>
+    `;
+    const signature = JSON.stringify({
+      ts,
+      toolCount,
+      gapLabel,
+      isGapWarning,
+      hasCacheReadDrop,
+      model: s.model || '',
+      input: s.input,
+      output: s.output,
+      cacheRead: s.cacheRead,
+      cacheWrite: s.cacheWrite,
+      cost: s.cost,
+      userPrompt: s.userPrompt || '',
+      thinking: s.thinking || '',
+      response: s.response || '',
+      stopReason: s.stopReason || '',
+      toolCalls: s.toolCalls || [],
+    });
+
+    items.push({ stepKey, rowClass, rowHTML, detailsHTML, signature });
+    prevTimestamp = currentTimestamp || prevTimestamp;
+    prevCacheRead = s.cacheRead;
+  }
+
+  return items;
+}
+
+function applyStepRender(pair, item) {
+  const isOpen = pair.row.classList.contains('open') || openStepKeys.has(item.stepKey);
+  pair.row.className = `${item.rowClass}${isOpen ? ' open' : ''}`;
+  pair.row.dataset.stepKey = item.stepKey;
+  pair.row.dataset.signature = item.signature;
+  pair.row.innerHTML = item.rowHTML;
+  pair.detailsRow.className = `step-details${isOpen ? ' open' : ''}`;
+  pair.detailsRow.innerHTML = item.detailsHTML;
+}
+
+function renderSteps(steps) {
+  captureOpenSteps();
+  const stepsEl = document.getElementById('steps');
+  const existingPairs = new Map();
+  for (const row of stepsEl.querySelectorAll('tr.step-row')) {
+    const detailsRow = row.nextElementSibling;
+    if (!detailsRow || !detailsRow.classList.contains('step-details') || !row.dataset.stepKey) continue;
+    existingPairs.set(row.dataset.stepKey, { row, detailsRow });
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const item of buildStepRenderItems(steps)) {
+    let pair = existingPairs.get(item.stepKey);
+    if (!pair) {
+      const row = document.createElement('tr');
+      const detailsRow = document.createElement('tr');
+      bindStepToggle(row, detailsRow, item.stepKey);
+      pair = { row, detailsRow };
+    } else {
+      existingPairs.delete(item.stepKey);
+    }
+    if (pair.row.dataset.signature !== item.signature) {
+      applyStepRender(pair, item);
+    }
+    fragment.appendChild(pair.row);
+    fragment.appendChild(pair.detailsRow);
+  }
+
+  stepsEl.replaceChildren(fragment);
+  captureOpenSteps();
+}
+
 async function load() {
   if (loadInFlight) return;
   loadInFlight = true;
@@ -189,6 +319,7 @@ async function load() {
       console.error('Invalid JSON in detail response', e);
       return;
     }
+    currentRevision = res.headers.get('X-Session-Revision') || currentRevision;
 
   document.getElementById('title').textContent = `${d.agent} session ${d.id.slice(0,8)}`;
   document.getElementById('subtitle').textContent = d.title || d.project || '';
@@ -210,7 +341,7 @@ async function load() {
         <div class="label">Parent session</div>
         <div class="relation-links">
           <a class="relation-link" href="/detail?agent=${encodeURIComponent(d.parent.agent)}&id=${encodeURIComponent(d.parent.id)}">
-            <span class="relation-agent">${d.parent.agent}</span>
+            <span class="relation-agent">${escHtml(d.parent.agent)}</span>
             <span>${escHtml(d.parent.title || d.parent.project || d.parent.id)}</span>
           </a>
         </div>
@@ -404,70 +535,43 @@ async function load() {
 
   // costChart removed — cost is now plotted on the right axis of cumChart
 
-  const stepsEl = document.getElementById('steps');
-  stepsEl.innerHTML = '';
-  let prevTimestamp = null;
-  let prevCacheRead = null;
-  for (const s of d.steps) {
-    const ts = s.timestamp ? s.timestamp.replace('T',' ').replace(/\.\d+Z?/,'') : '';
-    const toolCount = s.toolCalls ? s.toolCalls.length : 0;
-    const currentTimestamp = s.timestamp ? new Date(s.timestamp) : null;
-    const gapMs = prevTimestamp && currentTimestamp ? currentTimestamp - prevTimestamp : NaN;
-    const isGapWarning = Number.isFinite(gapMs) && gapMs >= 5 * 60 * 1000;
-    const gapLabel = prevTimestamp && currentTimestamp ? formatGap(gapMs) : '–';
-    const gapHtml = isGapWarning
-      ? `<span class="gap-value warn"><span class="gap-alert">!</span>${gapLabel}</span>`
-      : `<span class="gap-value">${gapLabel}</span>`;
-    const hasCacheReadDrop = prevCacheRead !== null && s.cacheRead < prevCacheRead;
-
-    const row = document.createElement('tr');
-    row.className = `step-row${hasCacheReadDrop ? ' non-monotonic' : ''}`;
-    row.innerHTML = `
-      <td class="col-step"><span class="badge-step">${s.step}</span></td>
-      <td class="col-model"><span class="model-name">${s.model || '–'}</span></td>
-      <td class="col-time"><span class="timestamp">${ts}</span></td>
-      <td class="col-gap">${gapHtml}</td>
-      <td class="col-num">${s.input.toLocaleString()}</td>
-      <td class="col-num">${s.output.toLocaleString()}</td>
-      <td class="col-num">${s.cacheRead.toLocaleString()}</td>
-      <td class="col-num">${s.cacheWrite.toLocaleString()}</td>
-      <td class="col-tools"><span class="tools-count">${toolCount}</span></td>
-      <td class="col-cost"><span class="cost-value">$${s.cost.toFixed(4)}</span></td>
-    `;
-
-    const detailsRow = document.createElement('tr');
-    detailsRow.className = 'step-details';
-    detailsRow.innerHTML = `
-      <td colspan="10">
-        <div class="step-body">
-          ${s.userPrompt ? '<div class="user-block"><div class="label">User prompt</div><div class="user-text">'+escHtml(s.userPrompt)+'</div></div>' : ''}
-          ${s.thinking ? '<div class="think-block"><div class="label">Thinking</div><pre>'+escHtml(s.thinking)+'</pre></div>' : ''}
-          ${s.response ? '<div class="resp-block"><div class="label">Response</div><div class="resp-text">'+escHtml(s.response)+'</div></div>' : ''}
-          ${s.stopReason ? '<div class="stop-reason">Stop: <strong>'+escHtml(s.stopReason)+'</strong></div>' : ''}
-          ${s.toolCalls && s.toolCalls.length ? renderTools(s.toolCalls) : '<div class="no-tools">No tool calls</div>'}
-        </div>
-      </td>
-    `;
-
-    prevTimestamp = currentTimestamp || prevTimestamp;
-    prevCacheRead = s.cacheRead;
-
-    row.addEventListener('click', () => {
-      row.classList.toggle('open');
-      detailsRow.classList.toggle('open');
-    });
-
-    stepsEl.appendChild(row);
-    stepsEl.appendChild(detailsRow);
-  }
+  renderSteps(d.steps || []);
 
     lastLoadedAt = new Date();
     if (autoRefreshStatusEl) {
-      autoRefreshStatusEl.textContent = `Auto-refresh: every 10s · last update ${lastLoadedAt.toLocaleTimeString()}`;
+      autoRefreshStatusEl.textContent = `Live updates: connected · last update ${lastLoadedAt.toLocaleTimeString()}`;
     }
   } finally {
     loadInFlight = false;
   }
+}
+
+function connectStream() {
+  if (sessionStream) {
+    sessionStream.close();
+  }
+  sessionStream = new EventSource(`/api/session-stream/${encodeURIComponent(agent)}/${encodeURIComponent(id)}`);
+  sessionStream.addEventListener('revision', (event) => {
+    const nextRevision = (event.data || '').trim();
+    if (!nextRevision) return;
+    if (!currentRevision) {
+      currentRevision = nextRevision;
+      if (autoRefreshStatusEl) {
+        autoRefreshStatusEl.textContent = 'Live updates: connected';
+      }
+      return;
+    }
+    if (nextRevision === currentRevision) {
+      return;
+    }
+    currentRevision = nextRevision;
+    load();
+  });
+  sessionStream.onerror = () => {
+    if (autoRefreshStatusEl) {
+      autoRefreshStatusEl.textContent = 'Live updates: reconnecting…';
+    }
+  };
 }
 
 function escHtml(str) {
@@ -484,25 +588,27 @@ function renderTools(tools) {
       if (v == null) return '';
       if (typeof v === 'string') {
         try {
-          return `<pre>${JSON.stringify(JSON.parse(v), null, 2)}</pre>`;
-        } catch { return `<pre>${v}</pre>`; }
+          return `<pre>${escHtml(JSON.stringify(JSON.parse(v), null, 2))}</pre>`;
+        } catch { return `<pre>${escHtml(v)}</pre>`; }
       }
-      return `<pre>${JSON.stringify(v, null, 2)}</pre>`;
+      return `<pre>${escHtml(JSON.stringify(v, null, 2))}</pre>`;
     };
     if (t.input) inputHtml = `<div class="label">Arguments / Input</div>${pretty(t.input)}`;
     if (t.output) outputHtml = `<div class="label">Result / Output</div>${pretty(t.output)}`;
     const durBadge = t.durationMs != null ? ' <span class="dur-badge">'+(t.durationMs >= 1000 ? (t.durationMs/1000).toFixed(1)+'s' : t.durationMs+'ms')+'</span>' : '';
     const errBadge = t.error ? '<span style="color:#f87171;font-weight:700"> ERROR</span>' : '';
     return `<div class="tool">
-      <div class="tool-name">${t.name}${durBadge}${errBadge}${t.status ? ' <span style="color:#94a3b8;font-weight:400">('+t.status+')</span>' : ''}</div>
+      <div class="tool-name">${escHtml(t.name || '')}${durBadge}${errBadge}${t.status ? ' <span style="color:#94a3b8;font-weight:400">('+escHtml(t.status)+')</span>' : ''}</div>
       ${inputHtml}
       ${outputHtml}
     </div>`;
   }).join('');
 }
 
-load();
-setInterval(load, 10 * 1000);
+load().then(connectStream);
+window.addEventListener('beforeunload', () => {
+  if (sessionStream) sessionStream.close();
+});
 })();
 </script>
 </body>

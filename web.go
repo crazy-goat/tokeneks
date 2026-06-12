@@ -190,70 +190,7 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 				ChildCount:      sess.ChildCount,
 				IsSubsession:    sess.IsSubsession,
 			})
-			for _, childPath := range piSubsessionPaths(sess.Filepath) {
-				childData, err := piSessionUsage(childPath)
-				if err != nil || len(childData.Steps) == 0 {
-					continue
-				}
-				childByModel := make(map[string]*WebModelUsage)
-				for _, step := range childData.Steps {
-					if _, ok := childByModel[step.Model]; !ok {
-						provider := childData.ModelProviders[step.Model]
-						childByModel[step.Model] = &WebModelUsage{Model: step.Model, Provider: provider}
-					}
-					u := childByModel[step.Model]
-					prices := piGlobalModelPrices()[step.Model]
-					u.Input += step.Step.Input
-					u.CacheRead += step.Step.CacheRead
-					u.CacheWrite += step.Step.CacheCreation
-					u.Output += step.Step.Output
-					u.Cost += compute.PiStepActualCost(step.Step, prices)
-					u.Messages++
-				}
-				var childModels []WebModelUsage
-				var childInput, childPromptInput, childOutput, childCR, childCW int
-				var childCost float64
-				for _, u := range childByModel {
-					childCost += u.Cost
-					childInput += u.Input
-					childPromptInput += u.Input + u.CacheWrite
-					childOutput += u.Output
-					childCR += u.CacheRead
-					childCW += u.CacheWrite
-					childModels = append(childModels, *u)
-				}
-				sort.Slice(childModels, func(i, j int) bool {
-					return childModels[i].Cost > childModels[j].Cost
-				})
-				childBirth := getCreatedAt(childPath)
-				childLastAt := childData.LastActivity.UTC().Format("2006-01-02 15:04:05")
-				if childData.LastActivity.IsZero() {
-					childLastAt = childBirth.UTC().Format("2006-01-02 15:04:05")
-				}
-				childTitle := childData.Title
-				if childTitle == "" {
-					childTitle = sess.Title
-				}
-				result = append(result, WebSession{
-					Agent:           "PI",
-					ID:              piSessionIDFromPath(childPath),
-					Date:            childBirth.UTC().Format("2006-01-02 15:04"),
-					Project:         childTitle,
-					DominantModel:   childData.DominantModel,
-					LastMessage:     childLastAt,
-					Models:          childModels,
-					TotalInput:      childInput,
-					PromptInput:     childPromptInput,
-					TotalOutput:     childOutput,
-					TotalCacheRead:  childCR,
-					TotalCacheWrite: childCW,
-					TotalCost:       childCost,
-					Messages:        len(childData.Steps),
-					ToolCalls:       childData.ToolCalls,
-					ParentID:        sess.ID,
-					IsSubsession:    true,
-				})
-			}
+			appendPIChildSessions(&result, sess.Title, sess.ID, sess.Filepath)
 		}
 	}
 
@@ -340,8 +277,91 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 	return result, nil
 }
 
+func appendPIChildSessions(result *[]WebSession, parentTitle, parentID, parentPath string) {
+	for _, childPath := range piSubsessionPaths(parentPath) {
+		childData, err := piSessionUsage(childPath)
+		if err != nil || len(childData.Steps) == 0 {
+			continue
+		}
+		childByModel := make(map[string]*WebModelUsage)
+		for _, step := range childData.Steps {
+			if _, ok := childByModel[step.Model]; !ok {
+				provider := childData.ModelProviders[step.Model]
+				childByModel[step.Model] = &WebModelUsage{Model: step.Model, Provider: provider}
+			}
+			u := childByModel[step.Model]
+			prices := piGlobalModelPrices()[step.Model]
+			u.Input += step.Step.Input
+			u.CacheRead += step.Step.CacheRead
+			u.CacheWrite += step.Step.CacheCreation
+			u.Output += step.Step.Output
+			u.Cost += compute.PiStepActualCost(step.Step, prices)
+			u.Messages++
+		}
+		var childModels []WebModelUsage
+		var childInput, childPromptInput, childOutput, childCR, childCW int
+		var childCost float64
+		for _, u := range childByModel {
+			childCost += u.Cost
+			childInput += u.Input
+			childPromptInput += u.Input + u.CacheWrite
+			childOutput += u.Output
+			childCR += u.CacheRead
+			childCW += u.CacheWrite
+			childModels = append(childModels, *u)
+		}
+		sort.Slice(childModels, func(i, j int) bool {
+			return childModels[i].Cost > childModels[j].Cost
+		})
+		childBirth := getCreatedAt(childPath)
+		childLastAt := childData.LastActivity.UTC().Format("2006-01-02 15:04:05")
+		if childData.LastActivity.IsZero() {
+			childLastAt = childBirth.UTC().Format("2006-01-02 15:04:05")
+		}
+		childTitle := childData.Title
+		if childTitle == "" {
+			childTitle = parentTitle
+		}
+		childID := piSessionIDFromPath(childPath)
+		*result = append(*result, WebSession{
+			Agent:           "PI",
+			ID:              childID,
+			Date:            childBirth.UTC().Format("2006-01-02 15:04"),
+			Project:         childTitle,
+			DominantModel:   childData.DominantModel,
+			LastMessage:     childLastAt,
+			Models:          childModels,
+			TotalInput:      childInput,
+			PromptInput:     childPromptInput,
+			TotalOutput:     childOutput,
+			TotalCacheRead:  childCR,
+			TotalCacheWrite: childCW,
+			TotalCost:       childCost,
+			Messages:        len(childData.Steps),
+			ToolCalls:       childData.ToolCalls,
+			ParentID:        parentID,
+			ChildCount:      len(piSubsessionPaths(childPath)),
+			IsSubsession:    true,
+		})
+		appendPIChildSessions(result, childTitle, childID, childPath)
+	}
+}
+
 //go:embed web/detail.html
 var webDetailHTML []byte
+
+func parseWebSessionTime(value string) (time.Time, bool) {
+	if value == "" {
+		return time.Time{}, false
+	}
+	if ts, err := time.Parse("2006-01-02 15:04:05", value); err == nil {
+		return ts, true
+	}
+	if ts, err := time.Parse("2006-01-02 15:04", value); err == nil {
+		return ts, true
+	}
+	return time.Time{}, false
+}
 
 func filterWebSessionsByDateRange(sessions []WebSession, start, end string) []WebSession {
 	if start == "" && end == "" {
@@ -364,14 +384,24 @@ func filterWebSessionsByDateRange(sessions []WebSession, start, end string) []We
 	}
 	filtered := make([]WebSession, 0, len(sessions))
 	for _, s := range sessions {
-		ts, err := time.Parse("2006-01-02 15:04", s.Date)
-		if err != nil {
+		dateTS, dateOK := parseWebSessionTime(s.Date)
+		lastTS, lastOK := parseWebSessionTime(s.LastMessage)
+		if !dateOK && !lastOK {
 			continue
 		}
-		if !startTime.IsZero() && ts.Before(startTime) {
-			continue
+		matchesRange := func(ts time.Time) bool {
+			if ts.IsZero() {
+				return false
+			}
+			if !startTime.IsZero() && ts.Before(startTime) {
+				return false
+			}
+			if !endTime.IsZero() && ts.After(endTime) {
+				return false
+			}
+			return true
 		}
-		if !endTime.IsZero() && ts.After(endTime) {
+		if !matchesRange(dateTS) && !matchesRange(lastTS) {
 			continue
 		}
 		filtered = append(filtered, s)
@@ -426,6 +456,7 @@ func runWeb(port string, days int) error {
 	})
 
 	mux.HandleFunc("/api/session/", handleAPISessionDetail)
+	mux.HandleFunc("/api/session-stream/", handleAPISessionStream)
 
 	fmt.Printf("Web dashboard running on http://localhost:%s\n", port)
 	return http.ListenAndServe(":"+port, mux)

@@ -258,6 +258,12 @@ function restoreDateState(state) {
   pendingFilterState = state;
 }
 
+function escHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str == null ? '' : String(str);
+  return div.innerHTML;
+}
+
 function formatDateInput(d) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -437,7 +443,7 @@ function renderTable() {
     const modelsHtml = s.models.map((m) => {
       const name = modelDisplay(m);
       return `<div class="model-row">
-        <span class="model-name">${name}</span>
+        <span class="model-name">${escHtml(name)}</span>
       </div>`;
     }).join('');
     const relationBadges = [];
@@ -458,8 +464,8 @@ function renderTable() {
     tr.innerHTML = `
       <td>${sub(s.date, '')}</td>
       <td>${sub(s.lastMessage || '–', '')}</td>
-      <td>${sub(`<span class="agent agent-${s.agent === 'OpenCode' ? 'OpenCode' : s.agent}">${s.agent}</span>`, '')}</td>
-      <td title="${s.project}"><div class="session-meta"><span>${s.project.length > 32 ? s.project.slice(0,30)+'..' : s.project}</span>${relationBadges.join('')}</div>${relationNote}${aggregate ? `<div class="cell-sub">↳ with ${aggregate.childCount} sub${aggregate.childCount === 1 ? 'session' : 'sessions'}</div>` : ''}</td>
+      <td>${sub(`<span class="agent agent-${s.agent === 'OpenCode' ? 'OpenCode' : s.agent}">${escHtml(s.agent)}</span>`, '')}</td>
+      <td title="${escHtml(s.project)}"><div class="session-meta"><span>${escHtml(s.project.length > 32 ? s.project.slice(0,30)+'..' : s.project)}</span>${relationBadges.join('')}</div>${relationNote}${aggregate ? `<div class="cell-sub">↳ with ${aggregate.childCount} sub${aggregate.childCount === 1 ? 'session' : 'sessions'}</div>` : ''}</td>
       <td><div class="models">${modelsHtml}</div></td>
       <td>${sub(s.messages.toLocaleString(), aggregate ? aggregate.messages.toLocaleString() : '')}</td>
       <td>${sub(s.toolCalls.toLocaleString(), aggregate ? aggregate.toolCalls.toLocaleString() : '')}</td>

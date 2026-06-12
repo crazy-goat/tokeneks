@@ -146,15 +146,16 @@ func toolCallIsError(status string) bool {
 	return status == "error" || status == "failed"
 }
 
-// truncate shortens a string to at most max characters, appending "..." if truncated.
+// truncate shortens a string to at most max runes, appending "..." if truncated.
 func truncate(s string, max int) string {
-	if len(s) <= max {
+	r := []rune(s)
+	if len(r) <= max {
 		return s
 	}
 	if max <= 3 {
-		return s[:max]
+		return string(r[:max])
 	}
-	return s[:max-3] + "..."
+	return string(r[:max-3]) + "..."
 }
 
 func dominantModel(counts map[string]int) string {
