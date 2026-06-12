@@ -50,6 +50,10 @@ type WebSession struct {
 	IsSubsession    bool            `json:"isSubsession,omitempty"`
 }
 
+func piStepWebCost(step piSessionStep) float64 {
+	return step.Cost
+}
+
 var sessionsCache struct {
 	mu         sync.Mutex
 	data       []WebSession
@@ -143,12 +147,11 @@ func gatherWebSessions(days int) ([]WebSession, error) {
 					byModel[step.Model] = &WebModelUsage{Model: step.Model, Provider: provider}
 				}
 				u := byModel[step.Model]
-				prices := piGlobalModelPrices()[step.Model]
 				u.Input += step.Step.Input
 				u.CacheRead += step.Step.CacheRead
 				u.CacheWrite += step.Step.CacheCreation
 				u.Output += step.Step.Output
-				u.Cost += compute.PiStepActualCost(step.Step, prices)
+				u.Cost += piStepWebCost(step)
 				u.Messages++
 			}
 			var models []WebModelUsage
@@ -290,12 +293,11 @@ func appendPIChildSessions(result *[]WebSession, parentTitle, parentID, parentPa
 				childByModel[step.Model] = &WebModelUsage{Model: step.Model, Provider: provider}
 			}
 			u := childByModel[step.Model]
-			prices := piGlobalModelPrices()[step.Model]
 			u.Input += step.Step.Input
 			u.CacheRead += step.Step.CacheRead
 			u.CacheWrite += step.Step.CacheCreation
 			u.Output += step.Step.Output
-			u.Cost += compute.PiStepActualCost(step.Step, prices)
+			u.Cost += piStepWebCost(step)
 			u.Messages++
 		}
 		var childModels []WebModelUsage
