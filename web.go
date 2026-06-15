@@ -1,15 +1,14 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
-	"sort"
 	"sync"
 	"time"
-	"tokeneks/compute"
+	"tokeneks/ingest"
 )
 
 //go:embed web/index.html
@@ -86,267 +85,7 @@ func getCachedSessions(days int) ([]WebSession, error) {
 }
 
 func gatherWebSessions(days int) ([]WebSession, error) {
-	var result []WebSession
-
-	// OpenCode
-	ocSess, err := ocSessions(days, "")
-	if err != nil {
-		log.Printf("web aggregator: OpenCode sessions load failed: %v", err)
-	} else {
-		for _, sess := range ocSess {
-			usage := WebModelUsage{
-				Model:     sess.Model,
-				Provider:  sess.Provider,
-				Input:     sess.TokensInput,
-				CacheRead: sess.TokensCacheRead,
-				Output:    sess.TokensOutput,
-				Messages:  sess.Steps,
-				Cost:      sess.Cost,
-			}
-			toolCalls, _ := ocToolCalls(sess.ID)
-			lastAt := time.Unix(sess.LastActivity/1000, 0).UTC().Format("2006-01-02 15:04:05")
-			if sess.LastActivity == 0 {
-				lastAt = time.Unix(sess.CreatedAt/1000, 0).UTC().Format("2006-01-02 15:04:05")
-			}
-			result = append(result, WebSession{
-				Agent:           "OpenCode",
-				ID:              sess.ID,
-				Date:            time.Unix(sess.CreatedAt/1000, 0).UTC().Format("2006-01-02 15:04"),
-				Project:         sess.Title,
-				DominantModel:   sess.Model,
-				LastMessage:     lastAt,
-				Models:          []WebModelUsage{usage},
-				TotalInput:      sess.TokensInput,
-				PromptInput:     sess.TokensInput,
-				TotalOutput:     sess.TokensOutput,
-				TotalCacheRead:  sess.TokensCacheRead,
-				TotalCacheWrite: sess.TokensCacheWrite,
-				TotalCost:       sess.Cost,
-				Messages:        sess.Steps,
-				ToolCalls:       toolCalls,
-				ParentID:        sess.ParentID,
-				IsSubsession:    sess.ParentID != "",
-			})
-		}
-	}
-
-	// PI
-	piSess, err := piSessions(days, "")
-	if err != nil {
-		log.Printf("web aggregator: PI sessions load failed: %v", err)
-	} else {
-		for _, sess := range piSess {
-			data := sess.Data
-			if data == nil || len(data.Steps) == 0 {
-				continue
-			}
-			byModel := make(map[string]*WebModelUsage)
-			for _, step := range data.Steps {
-				if _, ok := byModel[step.Model]; !ok {
-					provider := data.ModelProviders[step.Model]
-					byModel[step.Model] = &WebModelUsage{Model: step.Model, Provider: provider}
-				}
-				u := byModel[step.Model]
-				u.Input += step.Step.Input
-				u.CacheRead += step.Step.CacheRead
-				u.CacheWrite += step.Step.CacheCreation
-				u.Output += step.Step.Output
-				u.Cost += piStepWebCost(step)
-				u.Messages++
-			}
-			var models []WebModelUsage
-			var totalInput, totalPromptInput, totalOutput, totalCR, totalCW int
-			var totalCost float64
-			for _, u := range byModel {
-				totalCost += u.Cost
-				totalInput += u.Input
-				totalPromptInput += u.Input + u.CacheWrite
-				totalOutput += u.Output
-				totalCR += u.CacheRead
-				totalCW += u.CacheWrite
-				models = append(models, *u)
-			}
-			sort.Slice(models, func(i, j int) bool {
-				return models[i].Cost > models[j].Cost
-			})
-			lastAt := sess.LastActivity.UTC().Format("2006-01-02 15:04:05")
-			if sess.LastActivity.IsZero() {
-				lastAt = sess.Birth.UTC().Format("2006-01-02 15:04:05")
-			}
-			result = append(result, WebSession{
-				Agent:           "PI",
-				ID:              sess.ID,
-				Date:            sess.Birth.UTC().Format("2006-01-02 15:04"),
-				Project:         sess.Title,
-				DominantModel:   sess.DominantModel,
-				LastMessage:     lastAt,
-				Models:          models,
-				TotalInput:      totalInput,
-				PromptInput:     totalPromptInput,
-				TotalOutput:     totalOutput,
-				TotalCacheRead:  totalCR,
-				TotalCacheWrite: totalCW,
-				TotalCost:       totalCost,
-				Messages:        len(data.Steps),
-				ToolCalls:       data.ToolCalls,
-				ParentID:        sess.ParentID,
-				ChildCount:      sess.ChildCount,
-				IsSubsession:    sess.IsSubsession,
-			})
-			appendPIChildSessions(&result, sess.Title, sess.ID, sess.Filepath)
-		}
-	}
-
-	// Claude
-	clSess, err := claudeSessions(days, "", "")
-	if err != nil {
-		log.Printf("web aggregator: Claude sessions load failed: %v", err)
-	} else {
-		for _, sess := range clSess {
-			res := sess.Data
-			if res == nil || len(res.Steps) == 0 {
-				continue
-			}
-			byModel := make(map[string]*WebModelUsage)
-			for _, step := range res.Steps {
-				if _, ok := byModel[step.Model]; !ok {
-					byModel[step.Model] = &WebModelUsage{Model: step.Model}
-				}
-				u := byModel[step.Model]
-				u.Input += step.Step.Input
-				u.CacheRead += step.Step.CacheRead
-				u.CacheWrite += step.Step.CacheCreation
-				u.Output += step.Step.Output
-				u.Messages++
-			}
-			var models []WebModelUsage
-			var totalInput, totalPromptInput, totalOutput, totalCR, totalCW int
-			var totalCost float64
-			for _, u := range byModel {
-				prices := claudeGlobalModelPrices()[u.Model]
-				u.Cost = compute.PiStepActualCost(compute.StepData{Input: u.Input, CacheCreation: u.CacheWrite, CacheRead: u.CacheRead, Output: u.Output}, prices)
-				totalCost += u.Cost
-				totalInput += u.Input
-				totalPromptInput += u.Input + u.CacheWrite
-				totalOutput += u.Output
-				totalCR += u.CacheRead
-				totalCW += u.CacheWrite
-				models = append(models, *u)
-			}
-			sort.Slice(models, func(i, j int) bool {
-				return models[i].Cost > models[j].Cost
-			})
-			lastAt := sess.LastActivity.UTC().Format("2006-01-02 15:04:05")
-			if sess.LastActivity.IsZero() {
-				lastAt = sess.Birth.UTC().Format("2006-01-02 15:04:05")
-			}
-			result = append(result, WebSession{
-				Agent:           "Claude",
-				ID:              sess.ID,
-				Date:            sess.Birth.UTC().Format("2006-01-02 15:04"),
-				Project:         sess.Project,
-				DominantModel:   sess.DominantModel,
-				LastMessage:     lastAt,
-				Models:          models,
-				TotalInput:      totalInput,
-				PromptInput:     totalPromptInput,
-				TotalOutput:     totalOutput,
-				TotalCacheRead:  totalCR,
-				TotalCacheWrite: totalCW,
-				TotalCost:       totalCost,
-				Messages:        sess.Msgs,
-				ToolCalls:       sess.ToolCalls,
-				ChildCount:      sess.SubagentCount,
-			})
-		}
-	}
-
-	ocChildren := make(map[string]int)
-	for i := range result {
-		if result[i].Agent == "OpenCode" && result[i].ParentID != "" {
-			ocChildren[result[i].ParentID]++
-		}
-	}
-	for i := range result {
-		if result[i].Agent == "OpenCode" {
-			result[i].ChildCount += ocChildren[result[i].ID]
-		}
-	}
-
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Date > result[j].Date
-	})
-
-	return result, nil
-}
-
-func appendPIChildSessions(result *[]WebSession, parentTitle, parentID, parentPath string) {
-	for _, childPath := range piSubsessionPaths(parentPath) {
-		childData, err := piSessionUsage(childPath)
-		if err != nil || len(childData.Steps) == 0 {
-			continue
-		}
-		childByModel := make(map[string]*WebModelUsage)
-		for _, step := range childData.Steps {
-			if _, ok := childByModel[step.Model]; !ok {
-				provider := childData.ModelProviders[step.Model]
-				childByModel[step.Model] = &WebModelUsage{Model: step.Model, Provider: provider}
-			}
-			u := childByModel[step.Model]
-			u.Input += step.Step.Input
-			u.CacheRead += step.Step.CacheRead
-			u.CacheWrite += step.Step.CacheCreation
-			u.Output += step.Step.Output
-			u.Cost += piStepWebCost(step)
-			u.Messages++
-		}
-		var childModels []WebModelUsage
-		var childInput, childPromptInput, childOutput, childCR, childCW int
-		var childCost float64
-		for _, u := range childByModel {
-			childCost += u.Cost
-			childInput += u.Input
-			childPromptInput += u.Input + u.CacheWrite
-			childOutput += u.Output
-			childCR += u.CacheRead
-			childCW += u.CacheWrite
-			childModels = append(childModels, *u)
-		}
-		sort.Slice(childModels, func(i, j int) bool {
-			return childModels[i].Cost > childModels[j].Cost
-		})
-		childBirth := getCreatedAt(childPath)
-		childLastAt := childData.LastActivity.UTC().Format("2006-01-02 15:04:05")
-		if childData.LastActivity.IsZero() {
-			childLastAt = childBirth.UTC().Format("2006-01-02 15:04:05")
-		}
-		childTitle := childData.Title
-		if childTitle == "" {
-			childTitle = parentTitle
-		}
-		childID := piSessionIDFromPath(childPath)
-		*result = append(*result, WebSession{
-			Agent:           "PI",
-			ID:              childID,
-			Date:            childBirth.UTC().Format("2006-01-02 15:04"),
-			Project:         childTitle,
-			DominantModel:   childData.DominantModel,
-			LastMessage:     childLastAt,
-			Models:          childModels,
-			TotalInput:      childInput,
-			PromptInput:     childPromptInput,
-			TotalOutput:     childOutput,
-			TotalCacheRead:  childCR,
-			TotalCacheWrite: childCW,
-			TotalCost:       childCost,
-			Messages:        len(childData.Steps),
-			ToolCalls:       childData.ToolCalls,
-			ParentID:        parentID,
-			ChildCount:      len(piSubsessionPaths(childPath)),
-			IsSubsession:    true,
-		})
-		appendPIChildSessions(result, childTitle, childID, childPath)
-	}
+	return gatherWebSessionsFromStore(context.Background(), days)
 }
 
 //go:embed web/detail.html
@@ -412,6 +151,27 @@ func filterWebSessionsByDateRange(sessions []WebSession, start, end string) []We
 }
 
 func runWeb(port string, days int) error {
+	st, err := openTokeneksStore()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	setTokeneksStore(st)
+
+	// Auto-sync on startup so the dashboard has fresh data.
+	sources, parsers := buildAgentIO()
+	ing := &ingest.Ingestor{
+		Store:     st,
+		Agents:    []string{"claude", "pi", "opencode"},
+		SourceFor: sources,
+		ParserFor: parsers,
+	}
+	if res, err := ing.Sync(context.Background()); err == nil {
+		fmt.Printf("sync: discovered=%d ingested=%d skipped=%d errors=%d\n", res.Discovered, res.Ingested, res.Skipped, res.Errors)
+	} else {
+		fmt.Printf("sync: %v\n", err)
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

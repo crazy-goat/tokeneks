@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"tokeneks/compute"
 
@@ -49,64 +48,6 @@ func TestHandleAPISessionStream_BadPath_Returns400(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected HTTP 400, got %d", w.Code)
-	}
-}
-
-func TestAppendPIChildSessions_NestedChildrenKeepParentID(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	sessionsDir := filepath.Join(home, ".pi", "agent", "sessions", "--Users-piotr-halas-work-tokeneks--")
-	projectDir := filepath.Join(sessionsDir, "proj")
-	rootFile := filepath.Join(projectDir, "2026-06-11_root.jsonl")
-	rootSessionDir := strings.TrimSuffix(rootFile, ".jsonl")
-
-	if err := os.MkdirAll(filepath.Join(rootSessionDir, "child1", "run-0", "session", "child2", "run-0"), 0o755); err != nil {
-		t.Fatalf("os.MkdirAll() = %v", err)
-	}
-
-	child1File := filepath.Join(rootSessionDir, "child1", "run-0", "session.jsonl")
-	child2File := filepath.Join(rootSessionDir, "child1", "run-0", "session", "child2", "run-0", "session.jsonl")
-
-	writePIJSONL := func(path, model string) {
-		t.Helper()
-		content := []byte(`{"type":"message","timestamp":"2026-06-11T00:00:00Z","message":{"role":"assistant","provider":"nexos-ai","model":"` + model + `","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"content":[{"type":"text","text":"hi"}]}}
-`)
-		if err := os.WriteFile(path, content, 0o644); err != nil {
-			t.Fatalf("os.WriteFile(%s) = %v", path, err)
-		}
-	}
-	writePIJSONL(child1File, "child1-model")
-	writePIJSONL(child2File, "child2-model")
-
-	sessions := []WebSession{{Agent: "PI", ID: "root", Project: "root"}}
-	appendPIChildSessions(&sessions, "root", "root", rootFile)
-
-	var child1, child2 *WebSession
-	for i := range sessions {
-		s := &sessions[i]
-		switch s.ID {
-		case "child1":
-			child1 = s
-		case "child2":
-			child2 = s
-		}
-	}
-
-	if child1 == nil {
-		t.Fatalf("first-level child PI session not found in web sessions: %+v", sessions)
-	}
-	if child2 == nil {
-		t.Fatalf("nested child PI session not found in web sessions: %+v", sessions)
-	}
-	if child1.ParentID != "root" {
-		t.Fatalf("child1.ParentID = %q, want %q", child1.ParentID, "root")
-	}
-	if child2.ParentID != "child1" {
-		t.Fatalf("child2.ParentID = %q, want %q", child2.ParentID, "child1")
-	}
-	if !child1.IsSubsession || !child2.IsSubsession {
-		t.Fatalf("expected nested children to be marked as subsessions: child1=%v child2=%v", child1.IsSubsession, child2.IsSubsession)
 	}
 }
 

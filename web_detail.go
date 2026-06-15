@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -329,24 +330,7 @@ func ocSessionRevision(sessionID string) (string, error) {
 }
 
 func sessionRevision(agent, id string) (string, error) {
-	switch agent {
-	case "OpenCode":
-		return ocSessionRevision(id)
-	case "PI":
-		fp, _, err := resolvePISessionPath(id, 365*10)
-		if err != nil {
-			return "", err
-		}
-		return piSessionRevision(fp)
-	case "Claude":
-		fp, _, err := resolveClaudeSessionPath(id)
-		if err != nil {
-			return "", err
-		}
-		return claudeSessionRevision(fp)
-	default:
-		return "", fmt.Errorf("unknown agent")
-	}
+	return sessionRevisionFromStore(context.Background(), agent, id)
 }
 
 func handleAPISessionStream(w http.ResponseWriter, r *http.Request) {
@@ -421,35 +405,20 @@ func handleAPISessionDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
 	}
-	var detail *SessionDetail
-	var err error
-
-	switch agent {
-	case "OpenCode":
-		detail, err = ocSessionDetail(id)
-	case "PI":
-		fp, _, err2 := resolvePISessionPath(id, 365*10)
-		if err2 != nil {
-			http.Error(w, err2.Error(), http.StatusNotFound)
-			return
-		}
-		detail, err = piSessionDetail(fp)
-	case "Claude":
-		fp, _, err2 := resolveClaudeSessionPath(id)
-		if err2 != nil {
-			http.Error(w, err2.Error(), http.StatusNotFound)
-			return
-		}
-		detail, err = claudeSessionDetail(fp)
-	default:
-		http.Error(w, "unknown agent", http.StatusBadRequest)
-		return
-	}
+	detail, err := getSessionDetailFromStore(r.Context(), agent, id)
 	if err != nil {
+		if err.Error() == "no messages for session "+strings.ToLower(agent)+"/"+id {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no messages") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if revision, err := sessionRevision(agent, id); err == nil {
+	if revision, err := sessionRevisionFromStore(r.Context(), agent, id); err == nil {
 		w.Header().Set("X-Session-Revision", revision)
 	}
 	w.Header().Set("Content-Type", "application/json")

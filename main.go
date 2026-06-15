@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"tokeneks/compute"
@@ -79,7 +80,23 @@ func main() {
 	}
 	webCmd.Flags().StringVarP(&webPort, "port", "p", "8080", "HTTP port")
 
-	rootCmd.AddCommand(ocCmd, piCmd, claudeCmd, totalCmd, webCmd)
+	// sync — read all agent sources and write to the local store
+	syncCmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Ingest sessions from all agents into the local store",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSync(false)
+		},
+	}
+	syncWatchCmd := &cobra.Command{
+		Use:   "watch",
+		Short: "Ingest once, then watch agent sources for changes",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSync(true)
+		},
+	}
+
+	rootCmd.AddCommand(ocCmd, piCmd, claudeCmd, totalCmd, webCmd, syncCmd, syncWatchCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -87,43 +104,36 @@ func main() {
 }
 
 func printTotal(days int) error {
+	if err := ensureStoreReady(""); err != nil {
+		return err
+	}
 	kimi := ocModelPrices["Kimi K2.6"]
 
-	// OC total
-	ocSessions, err := ocSessions(days, "")
-	if err != nil {
-		return fmt.Errorf("OC: %w", err)
-	}
-	var ocActual, ocIdeal float64
-	ocIDs := make([]string, 0, len(ocSessions))
-	for _, sess := range ocSessions {
-		ocIDs = append(ocIDs, sess.ID)
-	}
-	ocStepsBySession, err := ocStepsBatch(ocIDs)
-	if err != nil {
-		return fmt.Errorf("OC: %w", err)
-	}
-	for _, sess := range ocSessions {
-		s := ocSessionSummary(ocStepsBySession[sess.ID], sess.Model)
-		ocActual += s.Actual
-		ocIdeal += s.Ideal
+	summarize := func(agent string) (actual, ideal float64, err error) {
+		sessions, err := aggregateSessionsFromStore(context.Background(), agent, days, "")
+		if err != nil {
+			return 0, 0, err
+		}
+		for _, sess := range sessions {
+			prices := kimi
+			if p, ok := ocModelPrices[sess.Model]; ok && p.Input > 0 {
+				prices = p
+			}
+			rows := compute.ComputeIdeal(sess.Steps)
+			s := compute.Summarize(rows, prices)
+			actual += s.Actual
+			ideal += s.Ideal
+		}
+		return actual, ideal, nil
 	}
 
-	// PI total
-	piSess, err := piSessions(days, "")
+	ocActual, ocIdeal, err := summarize("opencode")
+	if err != nil {
+		return fmt.Errorf("OC: %w", err)
+	}
+	piActual, piIdeal, err := summarize("pi")
 	if err != nil {
 		return fmt.Errorf("PI: %w", err)
-	}
-	var piActual, piIdeal float64
-	for _, sess := range piSess {
-		steps, err := piMessages(sess.Filepath)
-		if err != nil || len(steps) == 0 {
-			continue
-		}
-		rows := compute.ComputeIdeal(steps)
-		s := compute.Summarize(rows, kimi)
-		piActual += s.Actual
-		piIdeal += s.Ideal
 	}
 
 	totalActual := ocActual + piActual
