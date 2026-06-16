@@ -129,6 +129,7 @@ type ocSession struct {
 	Title            string
 	Model            string
 	Provider         string
+	Project          string
 	Steps            int
 	Cost             float64
 	TokensInput      int
@@ -152,9 +153,11 @@ func ocSessions(days int, date string) ([]ocSession, error) {
 	if date != "" {
 		query = `
 			SELECT s.id, s.title, json_extract(s.model, '$.id'), ifnull(json_extract(s.model, '$.providerID'),''), s.time_created, ifnull(MAX(p.time_created), s.time_created), count(*) as steps,
-				ifnull(s.tokens_input,0), ifnull(s.tokens_output,0), ifnull(s.tokens_cache_read,0), ifnull(s.tokens_cache_write,0), ifnull(s.parent_id, ''), ifnull(sum(json_extract(p.data, '$.cost')), 0)
+				ifnull(s.tokens_input,0), ifnull(s.tokens_output,0), ifnull(s.tokens_cache_read,0), ifnull(s.tokens_cache_write,0), ifnull(s.parent_id, ''), ifnull(sum(json_extract(p.data, '$.cost')), 0),
+				coalesce(pr.name, pr.worktree, '')
 			FROM session s
 			JOIN part p ON p.session_id = s.id
+			LEFT JOIN project pr ON pr.id = s.project_id
 			WHERE json_extract(p.data, '$.type') = 'step-finish'
 			AND date(s.time_created / 1000, 'unixepoch') = ?
 			GROUP BY s.id
@@ -165,9 +168,11 @@ func ocSessions(days int, date string) ([]ocSession, error) {
 		cutoff := fmt.Sprintf("-%d days", days)
 		query = `
 			SELECT s.id, s.title, json_extract(s.model, '$.id'), ifnull(json_extract(s.model, '$.providerID'),''), s.time_created, ifnull(MAX(p.time_created), s.time_created), count(*) as steps,
-				ifnull(s.tokens_input,0), ifnull(s.tokens_output,0), ifnull(s.tokens_cache_read,0), ifnull(s.tokens_cache_write,0), ifnull(s.parent_id, ''), ifnull(sum(json_extract(p.data, '$.cost')), 0)
+				ifnull(s.tokens_input,0), ifnull(s.tokens_output,0), ifnull(s.tokens_cache_read,0), ifnull(s.tokens_cache_write,0), ifnull(s.parent_id, ''), ifnull(sum(json_extract(p.data, '$.cost')), 0),
+				coalesce(pr.name, pr.worktree, '')
 			FROM session s
 			JOIN part p ON p.session_id = s.id
+			LEFT JOIN project pr ON pr.id = s.project_id
 			WHERE json_extract(p.data, '$.type') = 'step-finish'
 			AND s.time_created > (strftime('%s', 'now', ?) * 1000)
 			GROUP BY s.id
@@ -186,7 +191,7 @@ func ocSessions(days int, date string) ([]ocSession, error) {
 	for rows.Next() {
 		var s ocSession
 		if err := rows.Scan(&s.ID, &s.Title, &s.Model, &s.Provider, &s.CreatedAt, &s.LastActivity, &s.Steps,
-			&s.TokensInput, &s.TokensOutput, &s.TokensCacheRead, &s.TokensCacheWrite, &s.ParentID, &s.Cost); err != nil {
+			&s.TokensInput, &s.TokensOutput, &s.TokensCacheRead, &s.TokensCacheWrite, &s.ParentID, &s.Cost, &s.Project); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, s)

@@ -432,10 +432,15 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 		return nil, err
 	}
 
-	var title, modelRaw, parentID string
+	var title, modelRaw, parentID, projectName string
 	var createdAt int64
 	var modelName string
-	if err := db.QueryRow("SELECT title, model, time_created, ifnull(parent_id, '') FROM session WHERE id = ?", sessionID).Scan(&title, &modelRaw, &createdAt, &parentID); err != nil && err != sql.ErrNoRows {
+	if err := db.QueryRow(`
+		SELECT s.title, s.model, s.time_created, ifnull(s.parent_id, ''), coalesce(p.name, p.worktree, '')
+		FROM session s
+		LEFT JOIN project p ON p.id = s.project_id
+		WHERE s.id = ?
+	`, sessionID).Scan(&title, &modelRaw, &createdAt, &parentID, &projectName); err != nil && err != sql.ErrNoRows {
 		// non-row errors are unexpected; proceed with zero values
 	}
 	if modelRaw != "" {
@@ -603,6 +608,7 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 		Agent:     "OpenCode",
 		ID:        sessionID,
 		Title:     title,
+		Project:   projectName,
 		Model:     modelName,
 		Date:      time.Unix(createdAt/1000, 0).UTC().Format("2006-01-02 15:04"),
 		Steps:     steps,
