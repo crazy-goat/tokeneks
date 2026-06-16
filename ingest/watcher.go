@@ -208,9 +208,6 @@ func (w *Watcher) filterChangedRefs(ctx context.Context, agent string, refs []Se
 			changed = append(changed, ref)
 		}
 	}
-	if w.log != nil && len(refs) != len(changed) {
-		w.log.Printf("%s skip: %d unchanged, %d changed", agent, len(refs)-len(changed), len(changed))
-	}
 	return changed, nil
 }
 
