@@ -161,9 +161,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 	w.log.Printf("initial sync done in %s", time.Since(start))
 
-	// OpenCode polling
+	// OpenCode: watch the DB directory for WAL/db changes.
 	if oc, ok := w.ingestor.SourceFor["opencode"]; ok {
-		go w.pollOpenCode(ctx, oc)
+		go w.watchOpenCode(ctx, oc)
 	}
 
 	for {
@@ -320,8 +320,80 @@ func (w *Watcher) reingestRef(ctx context.Context, ref SessionRef) {
 	w.emit(SessionEvent{Agent: ref.Agent, SessionID: ref.SessionID, Source: ref.Source, Kind: Changed, Time: time.Now()})
 }
 
-func (w *Watcher) pollOpenCode(ctx context.Context, src Source) {
-	var lastMTime int64
+// watchOpenCode watches the directory that contains the opencode.db file
+// using fsnotify and re-ingests changed sessions whenever the main db or
+// its WAL sidecar is written. Falls back to a ticker if fsnotify cannot
+// be set up.
+func (w *Watcher) watchOpenCode(ctx context.Context, src Source) {
+	root := src.Root()
+	if root == "" {
+		return
+	}
+	dbDir := filepath.Dir(root)
+	dbName := filepath.Base(root)
+
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		w.log.Printf("opencode: fsnotify unavailable (%v); falling back to %s poll", err, w.cfg.OpenCodePoll)
+		w.pollOpenCodeByTicker(ctx, src)
+		return
+	}
+	defer fsw.Close()
+
+	if err := fsw.Add(dbDir); err != nil {
+		w.log.Printf("opencode: cannot watch %s (%v); falling back to poll", dbDir, err)
+		_ = fsw.Close()
+		w.pollOpenCodeByTicker(ctx, src)
+		return
+	}
+	w.log.Printf("opencode: watching %s", dbDir)
+
+	var (
+		mu      sync.Mutex
+		pending *time.Timer
+	)
+	debounce := func() {
+		mu.Lock()
+		if pending != nil {
+			pending.Stop()
+		}
+		pending = time.AfterFunc(w.cfg.Debounce, func() {
+			mu.Lock()
+			pending = nil
+			mu.Unlock()
+			w.rediscoverOpenCode(ctx, src)
+		})
+		mu.Unlock()
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-fsw.Events:
+			if !ok {
+				return
+			}
+			base := filepath.Base(ev.Name)
+			if base != dbName && base != dbName+"-wal" {
+				continue
+			}
+			if !ev.Has(fsnotify.Write) && !ev.Has(fsnotify.Create) && !ev.Has(fsnotify.Rename) {
+				continue
+			}
+			debounce()
+		case err, ok := <-fsw.Errors:
+			if !ok {
+				return
+			}
+			w.log.Printf("opencode fsnotify: %v", err)
+		}
+	}
+}
+
+// pollOpenCodeByTicker is the fallback when fsnotify cannot watch the
+// opencode DB directory. It checks for changes every OpenCodePoll interval.
+func (w *Watcher) pollOpenCodeByTicker(ctx context.Context, src Source) {
 	t := time.NewTicker(w.cfg.OpenCodePoll)
 	defer t.Stop()
 	for {
@@ -329,29 +401,23 @@ func (w *Watcher) pollOpenCode(ctx context.Context, src Source) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			root := src.Root()
-			if root == "" {
-				continue
-			}
-			mtime := dbFileMTime(root)
-			if mtime == lastMTime {
-				continue
-			}
-			lastMTime = mtime
-			refs, err := src.Discover(ctx)
-			if err != nil {
-				w.log.Printf("opencode re-discover: %v", err)
-				continue
-			}
-			refs, err = w.filterChangedRefs(ctx, "opencode", refs)
-			if err != nil {
-				w.log.Printf("opencode filter: %v", err)
-				// continue with original refs (fail open)
-			}
-			for _, ref := range refs {
-				w.reingestRef(ctx, ref)
-			}
+			w.rediscoverOpenCode(ctx, src)
 		}
+	}
+}
+
+func (w *Watcher) rediscoverOpenCode(ctx context.Context, src Source) {
+	refs, err := src.Discover(ctx)
+	if err != nil {
+		w.log.Printf("opencode re-discover: %v", err)
+		return
+	}
+	refs, err = w.filterChangedRefs(ctx, "opencode", refs)
+	if err != nil {
+		w.log.Printf("opencode filter: %v", err)
+	}
+	for _, ref := range refs {
+		w.reingestRef(ctx, ref)
 	}
 }
 
