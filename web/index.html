@@ -516,19 +516,19 @@ function renderTable() {
   const cachePct = (totIn + totCR) > 0 ? (totCR / (totIn + totCR) * 100) : 0;
   const costPerM = totTokens > 0 ? totCost / totTokens * 1e6 : 0;
   const cacheColor = cachePct >= 50 ? '#22c55e' : cachePct >= 20 ? '#fbbf24' : '';
-  t.innerHTML = `
-    <td colspan="5" style="text-align:right;color:#94a3b8">TOTAL (${sorted.length} sessions)</td>
-    <td>${totMsgs.toLocaleString()}</td>
-    <td>${totTools.toLocaleString()}</td>
-    <td>${totIn.toLocaleString()}</td>
-    <td>${totOut.toLocaleString()}</td>
-    <td>${totCR.toLocaleString()}</td>
-    <td>${totCW.toLocaleString()}</td>
-    <td><span style="color:${cacheColor};font-weight:600">${cachePct.toFixed(1)}%</span></td>
-    <td>${totTokens.toLocaleString()}</td>
-    <td style="font-weight:700;color:#fff">$${totCost.toFixed(2)}</td>
-    <td style="color:#94a3b8">$${costPerM.toFixed(2)}</td>
-  `;
+  t.innerHTML = [
+    '<td style="color:#94a3b8" colspan="5">TOTAL (' + sorted.length + ' sessions)</td>',
+    '<td style="text-align:right">' + totMsgs.toLocaleString() + '</td>',
+    '<td style="text-align:right">' + totTools.toLocaleString() + '</td>',
+    '<td style="text-align:right">' + totIn.toLocaleString() + '</td>',
+    '<td style="text-align:right">' + totOut.toLocaleString() + '</td>',
+    '<td style="text-align:right">' + totCR.toLocaleString() + '</td>',
+    '<td style="text-align:right">' + totCW.toLocaleString() + '</td>',
+    '<td style="text-align:right"><span style="color:' + cacheColor + ';font-weight:600">' + cachePct.toFixed(1) + '%</span></td>',
+    '<td style="text-align:right">' + totTokens.toLocaleString() + '</td>',
+    '<td style="text-align:right;font-weight:700;color:#fff">$' + totCost.toFixed(2) + '</td>',
+    '<td style="text-align:right;color:#94a3b8">$' + costPerM.toFixed(2) + '</td>',
+  ].join('');
   tbody.appendChild(t);
 
   document.querySelectorAll('th.sortable').forEach(th => {
