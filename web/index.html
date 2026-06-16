@@ -212,7 +212,8 @@ function updateChartOrCreate(canvasId, config) {
   const existing = Chart.getChart(canvasId);
   if (existing) {
     existing.data = config.data;
-    existing.update('none');
+    existing.options.animation = false;
+    existing.update();
     return existing;
   }
   if (!config.options) config.options = {};
