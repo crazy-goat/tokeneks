@@ -340,6 +340,8 @@ function modelDisplay(m) {
   return m.model;
 }
 
+function sum(arr, fn) { return arr.reduce((a, b) => a + fn(b), 0); }
+
 function cachePctHtml(s) {
   const cr = s.totalCacheRead, inp = s.totalInput;
   const pct = (inp + cr) > 0 ? cr / (inp + cr) * 100 : 0;
@@ -500,6 +502,35 @@ function renderTable() {
     tbody.appendChild(tr);
   }
 
+  // total row
+  const t = document.createElement('tr');
+  t.style.cssText = 'background:#0f172a;font-weight:700;border-top:2px solid #475569';
+  const totMsgs = sum(sorted, s => s.messages);
+  const totTools = sum(sorted, s => s.toolCalls);
+  const totIn = sum(sorted, s => s.totalInput);
+  const totOut = sum(sorted, s => s.totalOutput);
+  const totCR = sum(sorted, s => s.totalCacheRead);
+  const totCW = sum(sorted, s => s.totalCacheWrite);
+  const totTokens = totIn + totOut + totCR + totCW;
+  const totCost = sum(sorted, s => s.totalCost);
+  const cachePct = (totIn + totCR) > 0 ? (totCR / (totIn + totCR) * 100) : 0;
+  const costPerM = totTokens > 0 ? totCost / totTokens * 1e6 : 0;
+  const cacheColor = cachePct >= 50 ? '#22c55e' : cachePct >= 20 ? '#fbbf24' : '';
+  t.innerHTML = `
+    <td colspan="5" style="text-align:right;color:#94a3b8">TOTAL (${sorted.length} sessions)</td>
+    <td>${totMsgs.toLocaleString()}</td>
+    <td>${totTools.toLocaleString()}</td>
+    <td>${totIn.toLocaleString()}</td>
+    <td>${totOut.toLocaleString()}</td>
+    <td>${totCR.toLocaleString()}</td>
+    <td>${totCW.toLocaleString()}</td>
+    <td><span style="color:${cacheColor};font-weight:600">${cachePct.toFixed(1)}%</span></td>
+    <td>${totTokens.toLocaleString()}</td>
+    <td style="font-weight:700;color:#fff">$${totCost.toFixed(2)}</td>
+    <td style="color:#94a3b8">$${costPerM.toFixed(2)}</td>
+  `;
+  tbody.appendChild(t);
+
   document.querySelectorAll('th.sortable').forEach(th => {
     th.classList.toggle('sorted', th.dataset.sort === sortCol);
     const arrow = th.querySelector('.sort-arrow');
@@ -523,7 +554,6 @@ async function loadData() {
 
   populateFilters();
 
-  const sum = (arr, fn) => arr.reduce((a, b) => a + fn(b), 0);
   const totalCost = sum(allSessions, s => s.totalCost);
   const totalInput = sum(allSessions, s => s.totalInput);
   const totalOutput = sum(allSessions, s => s.totalOutput);
@@ -682,7 +712,6 @@ async function refreshData() {
   populateFilters();
   renderTable();
 
-  const sum = (arr, fn) => arr.reduce((a, b) => a + fn(b), 0);
   const totalCost = sum(allSessions, s => s.totalCost);
   const totalInput = sum(allSessions, s => s.totalInput);
   const totalOutput = sum(allSessions, s => s.totalOutput);
