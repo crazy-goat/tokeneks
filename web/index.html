@@ -104,8 +104,8 @@
 <table>
 <thead>
 <tr>
-<th class="sortable" data-sort="date">Date <span class="sort-arrow">▼</span></th>
-<th class="sortable" data-sort="lastMessage">Last activity <span class="sort-arrow">↕</span></th><th>Agent</th><th>Project</th><th>Models</th>
+<th class="sortable" data-sort="date">Date <span class="sort-arrow">↕</span></th>
+<th class="sortable" data-sort="lastMessage">Last activity <span class="sort-arrow">▼</span></th><th>Agent</th><th>Project</th><th>Models</th>
 <th class="sortable" data-sort="msgs">Msgs <span class="sort-arrow">↕</span></th>
 <th class="sortable" data-sort="tools">Tools <span class="sort-arrow">↕</span></th>
 <th class="sortable" data-sort="prompt">Input <span class="sort-arrow">↕</span></th>
@@ -203,7 +203,7 @@ class MultiSelect {
 /* ===== main app ===== */
 const charts = [];
 let allSessions = [];
-let sortCol = 'date';
+let sortCol = 'lastMessage';
 let sortDir = -1;
 
 let filterAgent, filterProvider, filterModel;
@@ -247,6 +247,8 @@ function saveFilterState() {
       startDate: document.getElementById('startDate').value,
       endDate: document.getElementById('endDate').value,
       hideSubsessions: document.getElementById('hideSubsessions').checked,
+      sortCol: sortCol,
+      sortDir: sortDir,
       agent: savedAgent,
       provider: savedProvider,
       model: savedModel,
@@ -792,6 +794,7 @@ document.querySelectorAll('th.sortable').forEach(th => {
     const col = th.dataset.sort;
     if (sortCol === col) { sortDir *= -1; }
     else { sortCol = col; sortDir = -1; }
+    saveFilterState();
     renderTable();
   });
 });
@@ -816,7 +819,12 @@ document.getElementById('endDate').addEventListener('change', () => {
   saveFilterState();
   loadData();
 });
-restoreDateState(readFilterState());
+const savedState = readFilterState();
+if (savedState) {
+  if (savedState.sortCol) sortCol = savedState.sortCol;
+  if (savedState.sortDir) sortDir = savedState.sortDir;
+}
+restoreDateState(savedState);
 loadData();
 setInterval(loadData, 5 * 60 * 1000);
 
