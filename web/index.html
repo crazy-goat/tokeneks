@@ -79,6 +79,7 @@
   <label style="font-size:0.8rem;color:#94a3b8">From <input id="startDate" type="date" style="margin-left:4px;background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:6px;padding:7px 8px"></label>
   <label style="font-size:0.8rem;color:#94a3b8">To <input id="endDate" type="date" style="margin-left:4px;background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:6px;padding:7px 8px"></label>
   <button id="reloadBtn" style="background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:0.9rem">🔄 Reload</button>
+  <span id="sseStatus" style="font-size:0.75rem;color:#64748b;display:flex;align-items:center;gap:4px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e"></span>live</span>
 </div>
 </div>
 <div class="summary" id="summary"></div>
@@ -206,6 +207,20 @@ let sortCol = 'date';
 let sortDir = -1;
 
 let filterAgent, filterProvider, filterModel;
+
+function updateChartOrCreate(canvasId, config) {
+  const existing = Chart.getChart(canvasId);
+  if (existing) {
+    existing.data = config.data;
+    existing.update('none');
+    return existing;
+  }
+  if (!config.options) config.options = {};
+  config.options.animation = false;
+  const c = new Chart(document.getElementById(canvasId), config);
+  charts.push(c);
+  return c;
+}
 
 const filterStateKey = 'tokeneks.dashboardFilters';
 let pendingFilterState = null;
@@ -543,7 +558,7 @@ async function loadData() {
     daily[day] = (daily[day] || 0) + s.totalCost;
   }
 
-  charts.push(new Chart(document.getElementById('agentCostChart'), {
+  updateChartOrCreate('agentCostChart', {
     type: 'bar',
     data: {
       labels: Object.keys(byAgent),
@@ -552,16 +567,17 @@ async function loadData() {
     options: {
       responsive:true,
       maintainAspectRatio:false,
+      animation: false,
       plugins: { legend: { display: false } },
       scales: {
         x: { ticks: { color:'#cbd5e1' }, grid: { display: false } },
         y: { ticks: { color:'#94a3b8' }, grid: { color:'#334155' } }
       }
     }
-  }));
+  });
 
   const agents = Object.keys(byAgentTokens);
-  charts.push(new Chart(document.getElementById('agentTokenChart'), {
+  updateChartOrCreate('agentTokenChart', {
     type: 'bar',
     data: {
       labels: agents,
@@ -572,28 +588,28 @@ async function loadData() {
         { label: 'Cache Write', data: agents.map(a=>byAgentTokens[a].cw), backgroundColor: '#22c55e' },
       ]
     },
-    options: { responsive:true, maintainAspectRatio:false, scales: { x:{stacked:true, ticks:{color:'#94a3b8'}}, y:{stacked:true, ticks:{color:'#94a3b8'}, grid:{color:'#334155'}} }, plugins:{legend:{position:'bottom',labels:{color:'#cbd5e1'}}}}
-  }));
+    options: { responsive:true, maintainAspectRatio:false, animation: false, scales: { x:{stacked:true, ticks:{color:'#94a3b8'}}, y:{stacked:true, ticks:{color:'#94a3b8'}, grid:{color:'#334155'}} }, plugins:{legend:{position:'bottom',labels:{color:'#cbd5e1'}}}}
+  });
 
   const days = Object.keys(daily).sort();
-  charts.push(new Chart(document.getElementById('dailyCostChart'), {
+  updateChartOrCreate('dailyCostChart', {
     type: 'line',
     data: {
       labels: days,
       datasets: [{ label: 'Cost', data: days.map(d=>daily[d]), borderColor: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.1)', fill:true, tension:0.3, pointBackgroundColor:'#38bdf8' }]
     },
-    options: { responsive:true, maintainAspectRatio:false, scales: { x:{ticks:{color:'#94a3b8'}}, y:{ticks:{color:'#94a3b8'}, grid:{color:'#334155'}} }, plugins:{legend:{position:'bottom',labels:{color:'#cbd5e1'}}}}
-  }));
+    options: { responsive:true, maintainAspectRatio:false, animation: false, scales: { x:{ticks:{color:'#94a3b8'}}, y:{ticks:{color:'#94a3b8'}, grid:{color:'#334155'}} }, plugins:{legend:{position:'bottom',labels:{color:'#cbd5e1'}}}}
+  });
 
   const top = [...allSessions].sort((a,b)=>b.totalCost - a.totalCost).slice(0,12);
-  charts.push(new Chart(document.getElementById('sessionCostChart'), {
+  const sessionChart = updateChartOrCreate('sessionCostChart', {
     type: 'bar',
     data: {
       labels: top.map(s => s.agent + ' ' + s.id.slice(0,8)),
       datasets: [{ label: 'Cost', data: top.map(s=>s.totalCost), backgroundColor: '#ffffff', borderRadius:4 }]
     },
     options: {
-      responsive:true, maintainAspectRatio:false, indexAxis:'y',
+      responsive:true, maintainAspectRatio:false, indexAxis:'y', animation: false,
       scales: { x:{ticks:{color:'#94a3b8'}, grid:{color:'#334155'}}, y:{ticks:{color:'#cbd5e1'}} },
       plugins:{legend:{display:false}},
       onClick: (e, elements) => {
@@ -607,7 +623,7 @@ async function loadData() {
         e.native.target.style.cursor = elements.length > 0 ? 'pointer' : '';
       }
     }
-  }));
+  });
 
   const canvas = document.getElementById('sessionCostChart');
   canvas.onclick = function(evt) {
@@ -651,6 +667,119 @@ async function loadData() {
   };
 }
 
+async function refreshData() {
+  const range = getSelectedRange();
+  const params = new URLSearchParams();
+  if (range.start) params.set('start', range.start);
+  if (range.end) params.set('end', range.end);
+  const res = await fetch('/api/sessions' + (params.toString() ? `?${params.toString()}` : ''));
+  if (!res.ok) return;
+  allSessions = await res.json();
+
+  populateFilters();
+  renderTable();
+
+  const sum = (arr, fn) => arr.reduce((a, b) => a + fn(b), 0);
+  const totalCost = sum(allSessions, s => s.totalCost);
+  const totalInput = sum(allSessions, s => s.totalInput);
+  const totalOutput = sum(allSessions, s => s.totalOutput);
+  const totalCR = sum(allSessions, s => s.totalCacheRead);
+  const totalCW = sum(allSessions, s => s.totalCacheWrite);
+  const totalMsgs = sum(allSessions, s => s.messages);
+  const totalToolCalls = sum(allSessions, s => s.toolCalls);
+
+  document.getElementById('summary').innerHTML = [
+    { label: 'Total Cost', value: '$'+totalCost.toFixed(2) },
+    { label: 'Input Tokens', value: totalInput.toLocaleString() },
+    { label: 'Output Tokens', value: totalOutput.toLocaleString() },
+    { label: 'Cache Read', value: totalCR.toLocaleString() },
+    { label: 'Cache Write', value: totalCW.toLocaleString() },
+    { label: 'Messages', value: totalMsgs.toLocaleString() },
+    { label: 'Tool Calls', value: totalToolCalls.toLocaleString() },
+    { label: 'Sessions', value: allSessions.length.toLocaleString() },
+  ].map(c => `<div class="card"><div class="value">${c.value}</div><div class="label">${c.label}</div></div>`).join('');
+
+  const byAgent = {};
+  const byAgentTokens = {};
+  const daily = {};
+  for (const s of allSessions) {
+    byAgent[s.agent] = (byAgent[s.agent] || 0) + s.totalCost;
+    byAgentTokens[s.agent] = byAgentTokens[s.agent] || { input:0, output:0, cr:0, cw:0 };
+    byAgentTokens[s.agent].input += s.totalInput;
+    byAgentTokens[s.agent].output += s.totalOutput;
+    byAgentTokens[s.agent].cr += s.totalCacheRead;
+    byAgentTokens[s.agent].cw += s.totalCacheWrite;
+    const day = s.date.slice(0,10);
+    daily[day] = (daily[day] || 0) + s.totalCost;
+  }
+
+  const agents = Object.keys(byAgentTokens);
+  const days = Object.keys(daily).sort();
+  const top = [...allSessions].sort((a,b)=>b.totalCost - a.totalCost).slice(0,12);
+
+  updateChartOrCreate('agentCostChart', {
+    type: 'bar',
+    data: {
+      labels: Object.keys(byAgent),
+      datasets: [{ data: Object.values(byAgent), backgroundColor: ['#7c3aed','#059669','#c2410c'], borderRadius: 6, borderWidth: 0 }]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false, animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color:'#cbd5e1' }, grid: { display: false } },
+        y: { ticks: { color:'#94a3b8' }, grid: { color:'#334155' } }
+      }
+    }
+  });
+
+  updateChartOrCreate('agentTokenChart', {
+    type: 'bar',
+    data: {
+      labels: agents,
+      datasets: [
+        { label: 'Input', data: agents.map(a=>byAgentTokens[a].input), backgroundColor: '#38bdf8' },
+        { label: 'Output', data: agents.map(a=>byAgentTokens[a].output), backgroundColor: '#ef4444' },
+        { label: 'Cache Read', data: agents.map(a=>byAgentTokens[a].cr), backgroundColor: '#94a3b8' },
+        { label: 'Cache Write', data: agents.map(a=>byAgentTokens[a].cw), backgroundColor: '#22c55e' },
+      ]
+    },
+    options: { responsive:true, maintainAspectRatio:false, animation: false, scales: { x:{stacked:true, ticks:{color:'#94a3b8'}}, y:{stacked:true, ticks:{color:'#94a3b8'}, grid:{color:'#334155'}} }, plugins:{legend:{position:'bottom',labels:{color:'#cbd5e1'}}}}
+  });
+
+  updateChartOrCreate('dailyCostChart', {
+    type: 'line',
+    data: {
+      labels: days,
+      datasets: [{ label: 'Cost', data: days.map(d=>daily[d]), borderColor: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.1)', fill:true, tension:0.3, pointBackgroundColor:'#38bdf8' }]
+    },
+    options: { responsive:true, maintainAspectRatio:false, animation: false, scales: { x:{ticks:{color:'#94a3b8'}}, y:{ticks:{color:'#94a3b8'}, grid:{color:'#334155'}} }, plugins:{legend:{position:'bottom',labels:{color:'#cbd5e1'}}}}
+  });
+
+  updateChartOrCreate('sessionCostChart', {
+    type: 'bar',
+    data: {
+      labels: top.map(s => s.agent + ' ' + s.id.slice(0,8)),
+      datasets: [{ label: 'Cost', data: top.map(s=>s.totalCost), backgroundColor: '#ffffff', borderRadius:4 }]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false, indexAxis:'y', animation: false,
+      scales: { x:{ticks:{color:'#94a3b8'}, grid:{color:'#334155'}}, y:{ticks:{color:'#cbd5e1'}} },
+      plugins:{legend:{display:false}},
+      onClick: (e, elements) => {
+        if (elements.length > 0) {
+          const idx = elements[0].index;
+          const session = top[idx];
+          window.location.href = `/detail?agent=${encodeURIComponent(session.agent)}&id=${encodeURIComponent(session.id)}`;
+        }
+      },
+      onHover: (e, elements) => {
+        e.native.target.style.cursor = elements.length > 0 ? 'pointer' : '';
+      }
+    }
+  });
+}
+
 // init multi-select filters
 filterAgent = new MultiSelect(document.getElementById('filterAgent'), 'All', () => { saveFilterState(); renderTable(); });
 filterProvider = new MultiSelect(document.getElementById('filterProvider'), 'All', () => { saveFilterState(); renderTable(); });
@@ -689,6 +818,21 @@ document.getElementById('endDate').addEventListener('change', () => {
 restoreDateState(readFilterState());
 loadData();
 setInterval(loadData, 5 * 60 * 1000);
+
+// SSE – auto-reload when watcher detects changes
+let sessionStream = null;
+(function connectStream() {
+  if (sessionStream) sessionStream.close();
+  sessionStream = new EventSource('/api/sessions-stream');
+  sessionStream.addEventListener('changed', () => { refreshData(); });
+  const statusEl = document.getElementById('sseStatus');
+  sessionStream.onopen = () => { statusEl.innerHTML = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e"></span>live'; };
+  sessionStream.onerror = () => {
+    sessionStream.close();
+    statusEl.innerHTML = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ef4444"></span>offline';
+    setTimeout(connectStream, 3000);
+  };
+})();
 </script>
 </body>
 </html>

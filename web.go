@@ -90,11 +90,46 @@ func getCachedSessions(days int) ([]WebSession, error) {
 // refetch from the store. Called by the background watcher on every
 // ingest event so the dashboard reflects source changes immediately
 // instead of waiting for the 30s TTL to expire.
+// sessionsStreamBroker manages SSE clients that want to be notified
+// when the session list changes. Used by the dashboard main page.
+type sessionsStreamBroker struct {
+	mu      sync.Mutex
+	clients map[chan struct{}]struct{}
+}
+
+func (b *sessionsStreamBroker) subscribe() chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ch := make(chan struct{}, 1)
+	b.clients[ch] = struct{}{}
+	return ch
+}
+
+func (b *sessionsStreamBroker) unsubscribe(ch chan struct{}) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.clients, ch)
+}
+
+func (b *sessionsStreamBroker) broadcast() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for ch := range b.clients {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+var sessionsStreamBrokerInstance = &sessionsStreamBroker{clients: make(map[chan struct{}]struct{})}
+
 func invalidateSessionsCache() {
 	sessionsCache.mu.Lock()
 	sessionsCache.cachedDays = -1
 	sessionsCache.expires = time.Time{}
 	sessionsCache.mu.Unlock()
+	sessionsStreamBrokerInstance.broadcast()
 }
 
 func gatherWebSessions(days int) ([]WebSession, error) {
@@ -247,9 +282,43 @@ func runWeb(port string, days int) error {
 		json.NewEncoder(w).Encode(sessions)
 	})
 
+	mux.HandleFunc("/api/sessions-stream", handleAPISessionsStream)
 	mux.HandleFunc("/api/session/", handleAPISessionDetail)
 	mux.HandleFunc("/api/session-stream/", handleAPISessionStream)
 
 	fmt.Printf("Web dashboard running on http://localhost:%s\n", port)
 	return http.ListenAndServe(":"+port, mux)
 }
+
+func handleAPISessionsStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	ch := sessionsStreamBrokerInstance.subscribe()
+	defer sessionsStreamBrokerInstance.unsubscribe(ch)
+
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-keepAlive.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
+		case <-ch:
+			fmt.Fprint(w, "event: changed\ndata: {}\n\n")
+			flusher.Flush()
+		}
+	}
+}
+

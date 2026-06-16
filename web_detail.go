@@ -1034,6 +1034,12 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 		Steps:     steps,
 		TotalCost: totalCost,
 	}
+	if strings.Contains(fp, string(filepath.Separator)+"subagents"+string(filepath.Separator)) {
+		parentID := filepath.Base(filepath.Dir(filepath.Dir(fp)))
+		if parentID != "" {
+			d.Parent = &SessionLink{Agent: "Claude", ID: parentID, Project: project}
+		}
+	}
 	baseDir := filepath.Dir(fp)
 	subDir := filepath.Join(baseDir, sessID, "subagents")
 	if subEntries, err := os.ReadDir(subDir); err == nil {

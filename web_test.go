@@ -91,6 +91,53 @@ func TestPIStepWebCost_UsesStoredUsageCost(t *testing.T) {
 	}
 }
 
+func TestSessionsStreamBroker_SubscribeBroadcastUnsubscribe(t *testing.T) {
+	b := &sessionsStreamBroker{clients: make(map[chan struct{}]struct{})}
+
+	ch1 := b.subscribe()
+	ch2 := b.subscribe()
+
+	b.broadcast()
+
+	select {
+	case <-ch1:
+	default:
+		t.Error("ch1 did not receive broadcast")
+	}
+	select {
+	case <-ch2:
+	default:
+		t.Error("ch2 did not receive broadcast")
+	}
+
+	b.unsubscribe(ch1)
+	b.broadcast()
+
+	select {
+	case <-ch1:
+		t.Error("ch1 received broadcast after unsubscribe")
+	default:
+	}
+	select {
+	case <-ch2:
+	default:
+		t.Error("ch2 did not receive broadcast after ch1 unsubscribed")
+	}
+
+	b.unsubscribe(ch2)
+	if len(b.clients) != 0 {
+		t.Errorf("expected 0 clients, got %d", len(b.clients))
+	}
+}
+
+func TestSessionsStreamBroker_NonBlocking(t *testing.T) {
+	b := &sessionsStreamBroker{clients: make(map[chan struct{}]struct{})}
+	ch := b.subscribe()
+	b.unsubscribe(ch)
+	// broadcast should not block even with no clients
+	b.broadcast()
+}
+
 func TestOCSessions_UsesStoredStepFinishCost(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

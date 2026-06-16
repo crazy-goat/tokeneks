@@ -52,12 +52,13 @@ type SyncResult struct {
 
 // Ingestor coordinates sources, parsers and the store.
 type Ingestor struct {
-	Store     *store.Store
-	Agents    []string
-	SourceFor map[string]Source
-	ParserFor map[string]Parser
-	Log       *log.Logger
-	OnError   func(ref SessionRef, err error)
+	Store       *store.Store
+	Agents      []string
+	SourceFor   map[string]Source
+	ParserFor   map[string]Parser
+	Log         *log.Logger
+	OnError     func(ref SessionRef, err error)
+	OnProgress  func(agent string, current, total int)
 }
 
 // Sync runs a full sync: discover all sessions and ingest them.
@@ -86,7 +87,7 @@ func (i *Ingestor) Sync(ctx context.Context) (SyncResult, error) {
 			continue
 		}
 		res.Discovered += len(refs)
-		for _, ref := range refs {
+		for idx, ref := range refs {
 			ps, err := parser(ctx, ref)
 			if err != nil {
 				// Parser failed: keep any existing row. We never destroy
@@ -95,15 +96,24 @@ func (i *Ingestor) Sync(ctx context.Context) (SyncResult, error) {
 				// or a brief mid-write state.
 				i.reportErr(ref, fmt.Errorf("parse: %w", err))
 				res.Errors++
+				if i.OnProgress != nil {
+					i.OnProgress(agent, idx+1, len(refs))
+				}
 				continue
 			}
 			ps.Session.SourceMTime = ref.MTime
 			if err := i.Store.IngestSession(ctx, ps); err != nil {
 				i.reportErr(ref, fmt.Errorf("store: %w", err))
 				res.Errors++
+				if i.OnProgress != nil {
+					i.OnProgress(agent, idx+1, len(refs))
+				}
 				continue
 			}
 			res.Ingested++
+			if i.OnProgress != nil {
+				i.OnProgress(agent, idx+1, len(refs))
+			}
 		}
 	}
 	return res, nil

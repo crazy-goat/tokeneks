@@ -51,10 +51,15 @@ func detailToStore(d *SessionDetail) (store.ParsedSession, error) {
 	if lastActivity == 0 {
 		lastActivity = createdAt
 	}
+	var parentID string
+	if d.Parent != nil {
+		parentID = d.Parent.ID
+	}
 	sess := store.Session{
 		Agent:        agent,
 		SessionID:    d.ID,
 		Project:      d.Project,
+		ParentID:     parentID,
 		CreatedAt:    createdAt,
 		LastActivity: lastActivity,
 	}

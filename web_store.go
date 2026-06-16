@@ -339,9 +339,13 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 
 	// children
 	childRows, err := st.DB().QueryContext(ctx, `
-		SELECT session_id, project, COALESCE(model, '') FROM session
-		WHERE agent = ? AND parent_id = ?
-		ORDER BY created_at ASC
+		SELECT s.session_id, COALESCE(s.project, ''),
+		       COALESCE((SELECT m.model FROM message m
+		                 WHERE m.agent = s.agent AND m.session_id = s.session_id
+		                 AND m.role = 'assistant' ORDER BY m.msg_index ASC LIMIT 1), '')
+		FROM session s
+		WHERE s.agent = ? AND s.parent_id = ?
+		ORDER BY s.created_at ASC
 	`, agent, sessionID)
 	if err == nil {
 		defer childRows.Close()
@@ -369,8 +373,12 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 	if sess.ParentID != "" {
 		var parentTitle, parentModel string
 		err := st.DB().QueryRowContext(ctx, `
-			SELECT COALESCE(project, ''), COALESCE(model, '') FROM session
-			WHERE agent = ? AND session_id = ?
+			SELECT COALESCE(s.project, ''),
+			       COALESCE((SELECT m.model FROM message m
+			                 WHERE m.agent = s.agent AND m.session_id = s.session_id
+			                 AND m.role = 'assistant' ORDER BY m.msg_index ASC LIMIT 1), '')
+			FROM session s
+			WHERE s.agent = ? AND s.session_id = ?
 		`, agent, sess.ParentID).Scan(&parentTitle, &parentModel)
 		if err == nil {
 			detail.Parent = &SessionLink{Agent: agentDisplayName(agent), ID: sess.ParentID, Title: parentTitle, Model: parentModel, Project: parentTitle}

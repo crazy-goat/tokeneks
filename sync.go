@@ -24,12 +24,27 @@ func runSync(watch bool) error {
 	defer st.Close()
 
 	sources, parsers := buildAgentIO()
+
+	dotCount := 0
+	progress := func(agent string, current, total int) {
+		if dotCount == 0 {
+			fmt.Printf("  %s: ", agent)
+		}
+		fmt.Print(".")
+		dotCount++
+		if current == total {
+			fmt.Printf(" %d/%d\n", current, total)
+			dotCount = 0
+		}
+	}
+
 	ing := &ingest.Ingestor{
-		Store:     st,
-		Agents:    []string{"claude", "pi", "opencode"},
-		SourceFor: sources,
-		ParserFor: parsers,
-		Log:       log.New(os.Stderr, "[sync] ", log.LstdFlags),
+		Store:       st,
+		Agents:      []string{"claude", "pi", "opencode"},
+		SourceFor:   sources,
+		ParserFor:   parsers,
+		Log:         log.New(os.Stderr, "[sync] ", log.LstdFlags),
+		OnProgress:  progress,
 	}
 	res, err := ing.Sync(context.Background())
 	if err != nil {
