@@ -5,7 +5,9 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 	"tokeneks/ingest"
@@ -84,6 +86,17 @@ func getCachedSessions(days int) ([]WebSession, error) {
 	return data, err
 }
 
+// invalidateSessionsCache forces the next getCachedSessions call to
+// refetch from the store. Called by the background watcher on every
+// ingest event so the dashboard reflects source changes immediately
+// instead of waiting for the 30s TTL to expire.
+func invalidateSessionsCache() {
+	sessionsCache.mu.Lock()
+	sessionsCache.cachedDays = -1
+	sessionsCache.expires = time.Time{}
+	sessionsCache.mu.Unlock()
+}
+
 func gatherWebSessions(days int) ([]WebSession, error) {
 	return gatherWebSessionsFromStore(context.Background(), days)
 }
@@ -158,19 +171,36 @@ func runWeb(port string, days int) error {
 	defer st.Close()
 	setTokeneksStore(st)
 
-	// Auto-sync on startup so the dashboard has fresh data.
+	// Initial ingest is handled by the watcher's initial sync (see
+	// Watcher.Run). HTTP server comes up immediately; data appears as
+	// soon as the watcher's initial sync completes.
 	sources, parsers := buildAgentIO()
-	ing := &ingest.Ingestor{
-		Store:     st,
-		Agents:    []string{"claude", "pi", "opencode"},
-		SourceFor: sources,
-		ParserFor: parsers,
-	}
-	if res, err := ing.Sync(context.Background()); err == nil {
-		fmt.Printf("sync: discovered=%d ingested=%d skipped=%d errors=%d\n", res.Discovered, res.Ingested, res.Skipped, res.Errors)
-	} else {
-		fmt.Printf("sync: %v\n", err)
-	}
+
+	// Background watcher keeps the store in sync with source files so
+	// the SSE-driven detail auto-refresh fires and the main-page cache
+	// gets invalidated as soon as sessions change.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := ingest.NewWatcher(st, sources, parsers, ingest.WatcherConfig{
+		Logger: log.New(os.Stderr, "[web-watch] ", log.LstdFlags),
+	})
+	defer w.Close()
+	go func() {
+		if err := w.Run(ctx); err != nil {
+			log.Printf("web watcher stopped: %v", err)
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case ev := <-w.Events():
+				log.Printf("[web-watch] %s %s/%s", ev.Kind, ev.Agent, ev.SessionID)
+				invalidateSessionsCache()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	mux := http.NewServeMux()
 

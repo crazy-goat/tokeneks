@@ -22,6 +22,17 @@ func echoParser(content string) Parser {
 	}
 }
 
+// emptyParser returns a session with no messages. Used to verify that
+// empty sessions are tracked in the store (so the mtime filter can
+// short-circuit subsequent polls) but do not emit SessionEvents.
+func emptyParser() Parser {
+	return func(ctx context.Context, ref SessionRef) (store.ParsedSession, error) {
+		return store.ParsedSession{
+			Session: store.Session{Agent: ref.Agent, SessionID: ref.SessionID, CreatedAt: 1, LastActivity: 1},
+		}, nil
+	}
+}
+
 // collectEvents reads up to n events with a timeout.
 func collectEvents(ch <-chan SessionEvent, n int, timeout time.Duration) []SessionEvent {
 	var out []SessionEvent
@@ -78,6 +89,66 @@ func TestWatcher_InitialSync_IngestsAndEmits(t *testing.T) {
 	}
 }
 
+func TestWatcher_EmptySession_StoredButNoEvent(t *testing.T) {
+	st := openStore(t)
+	src := &mockSource{agent: "oc", refs: []SessionRef{
+		{Agent: "oc", SessionID: "empty-1", Source: "/db"},
+		{Agent: "oc", SessionID: "full-1", Source: "/db"},
+		{Agent: "oc", SessionID: "empty-2", Source: "/db"},
+	}}
+	// One parser that returns empty for empty-* ids, one real message for full-*.
+	parser := func(ctx context.Context, ref SessionRef) (store.ParsedSession, error) {
+		if ref.SessionID == "full-1" {
+			return echoParser("hi")(ctx, ref)
+		}
+		return emptyParser()(ctx, ref)
+	}
+	w := NewWatcher(st, map[string]Source{"oc": src}, map[string]Parser{"oc": parser}, WatcherConfig{})
+
+	ctx := context.Background()
+	// Re-ingest two empty refs and one non-empty ref directly. Empty
+	// sessions must land in the store (so the mtime filter has a
+	// baseline) but must not emit events; the non-empty one must emit.
+	w.reingestRef(ctx, SessionRef{Agent: "oc", SessionID: "empty-1", Source: "/db", MTime: 0})
+	w.reingestRef(ctx, SessionRef{Agent: "oc", SessionID: "empty-2", Source: "/db", MTime: 0})
+	w.reingestRef(ctx, SessionRef{Agent: "oc", SessionID: "full-1", Source: "/db", MTime: 12345})
+
+	n, _ := st.CountSessions(ctx, "oc")
+	if n != 3 {
+		t.Errorf("CountSessions = %d, want 3 (empty sessions must still be in the store)", n)
+	}
+
+	// Drain events: only the non-empty session should have produced one.
+	ev := collectEvents(w.Events(), 1, 200*time.Millisecond)
+	if len(ev) != 1 {
+		t.Fatalf("got %d events, want 1 (only the non-empty session should emit)", len(ev))
+	}
+	if ev[0].SessionID != "full-1" {
+		t.Errorf("event for %q, want %q", ev[0].SessionID, "full-1")
+	}
+	// No more events should arrive.
+	if extra := collectEvents(w.Events(), 1, 100*time.Millisecond); len(extra) != 0 {
+		t.Errorf("got %d extra events, want 0", len(extra))
+	}
+
+	// source_mtime for empty sessions is 0; for the non-empty one it's
+	// the ref.MTime we passed.
+	for _, c := range []struct {
+		id    string
+		mTime int64
+	}{
+		{"empty-1", 0}, {"empty-2", 0}, {"full-1", 12345},
+	} {
+		sess, err := st.GetSession(ctx, "oc", c.id)
+		if err != nil {
+			t.Fatalf("GetSession(%s): %v", c.id, err)
+		}
+		if sess.SourceMTime != c.mTime {
+			t.Errorf("session %s SourceMTime = %d, want %d", c.id, sess.SourceMTime, c.mTime)
+		}
+	}
+}
+
 func TestWatcher_FileChange_Reingests(t *testing.T) {
 	st := openStore(t)
 	dir := t.TempDir()
@@ -115,7 +186,7 @@ func TestWatcher_FileChange_Reingests(t *testing.T) {
 	}
 }
 
-func TestWatcher_FileRemove_DeletesFromStore(t *testing.T) {
+func TestWatcher_FileRemove_KeepsSessionEmitsEvent(t *testing.T) {
 	st := openStore(t)
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "s1.jsonl")
@@ -142,13 +213,17 @@ func TestWatcher_FileRemove_DeletesFromStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	// wait for remove event
-	ev := <-w.Events()
-	if ev.Kind != Removed {
-		t.Errorf("event kind = %v, want Removed", ev.Kind)
+	ev := collectEvents(w.Events(), 1, 2*time.Second)
+	if len(ev) != 1 {
+		t.Fatalf("got %d events after remove, want 1", len(ev))
 	}
+	if ev[0].Kind != Removed {
+		t.Errorf("event kind = %v, want Removed", ev[0].Kind)
+	}
+	// Session is intentionally kept in the store so history is not lost.
 	n, _ = st.CountSessions(context.Background(), "claude")
-	if n != 0 {
-		t.Errorf("after remove: sessions=%d, want 0", n)
+	if n != 1 {
+		t.Errorf("after remove: sessions=%d, want 1 (session kept for history)", n)
 	}
 }
 
@@ -196,8 +271,17 @@ func TestResolveSessionID(t *testing.T) {
 		wantID   string
 	}{
 		{"/x/sess-abc.jsonl", "claude", "sess-abc"},
+		// pi main session: actual filename format is
+		// <timestamp-with-T-and-millis>_<uuid>.jsonl
+		{"/x/2026-06-15T08-30-24-854Z_aaa.jsonl", "pi", "aaa"},
+		// pi main session: shorter date-only prefix also works
 		{"/x/2026-06-15_aaa.jsonl", "pi", "aaa"},
-		{"/x/sub/session.jsonl", "pi", "sub"},
+		// pi nested session.jsonl: id is the GRANDPARENT dir, not the
+		// parent — using parent would collide on "run-0" across all
+		// sub-agent sessions sharing a parent
+		{"/x/sub/session.jsonl", "pi", "x"},
+		// pi real-world shape: <proj>/<date>_<id>/<hash>/run-0/session.jsonl
+		{"/x/proj/2026-06-15_aaa/abc123/run-0/session.jsonl", "pi", "abc123"},
 		{"/x/random.txt", "", ""},
 	}
 	for _, c := range cases {

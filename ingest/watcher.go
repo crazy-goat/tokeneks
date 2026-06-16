@@ -67,8 +67,13 @@ type Watcher struct {
 
 	events chan SessionEvent
 
+	// mu protects fsw and closed. fsw is read by addRecursive and
+	// written by Run / Close; closed is set to true once Close has
+	// been called so addRecursive can stop calling fsw.Add on a
+	// closed fsnotify.Watcher (which would panic inside fsnotify).
 	mu      sync.Mutex
 	fsw     *fsnotify.Watcher
+	closed  bool
 	pending map[string]*time.Timer
 }
 
@@ -104,35 +109,57 @@ func NewWatcher(st *store.Store, sources map[string]Source, parsers map[string]P
 func (w *Watcher) Events() <-chan SessionEvent { return w.events }
 
 // Run starts watching. It blocks until ctx is cancelled.
-// On startup, every currently-discovered session is re-ingested if its
-// source changed (incremental via Ingestor.Sync); unchanged sessions are
-// skipped.
+// On startup, every currently-discovered session is re-ingested
+// unconditionally — see ingest.Ingestor.Sync for the rationale
+// (filesystem mtimes are not a reliable signal for JSONL sources, and
+// a N-query skip check is slower than just re-parsing).
 func (w *Watcher) Run(ctx context.Context) error {
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
 	}
+	w.mu.Lock()
+	if w.closed {
+		// Close was called before Run started. Don't install fsw,
+		// and clean up the one we just created.
+		w.mu.Unlock()
+		_ = fsw.Close()
+		return nil
+	}
 	w.fsw = fsw
+	w.mu.Unlock()
 	defer fsw.Close()
 
-	// initial sync (incremental): the Ingestor skips up-to-date sessions.
-	for agent, src := range w.ingestor.SourceFor {
-		refs, err := src.Discover(ctx)
-		if err != nil {
-			w.log.Printf("initial discover %s: %v", agent, err)
-			continue
-		}
-		for _, ref := range refs {
-			if !w.shouldSkip(ctx, ref) {
-				w.reingest(ctx, ref)
-			}
-		}
+	// Set up filesystem watches before the initial ingest so that any
+	// changes arriving while we are parsing are caught by fsnotify and
+	// re-ingested via the debounce path. If we watched after ingesting,
+	// a file modified between emit and addRecursive would be silently lost.
+	for _, src := range w.ingestor.SourceFor {
 		if root := src.Root(); root != "" && dirExists(root) {
 			if err := w.addRecursive(root); err != nil {
 				w.log.Printf("watch %s: %v", root, err)
 			}
 		}
 	}
+
+	// initial sync
+	start := time.Now()
+	for agent, src := range w.ingestor.SourceFor {
+		refs, err := src.Discover(ctx)
+		if err != nil {
+			w.log.Printf("initial discover %s: %v", agent, err)
+			continue
+		}
+		refs, err = w.filterChangedRefs(ctx, agent, refs)
+		if err != nil {
+			w.log.Printf("filter %s: %v", agent, err)
+			// continue with original refs (fail open)
+		}
+		for _, ref := range refs {
+			w.reingest(ctx, ref)
+		}
+	}
+	w.log.Printf("initial sync done in %s", time.Since(start))
 
 	// OpenCode polling
 	if oc, ok := w.ingestor.SourceFor["opencode"]; ok {
@@ -157,15 +184,34 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Watcher) shouldSkip(ctx context.Context, ref SessionRef) bool {
-	if ref.MTime == 0 {
-		return false
+// filterChangedRefs drops refs whose per-session change marker is at or
+// below what's already in the store. One batch query per agent (not N
+// per-session queries). MTime sources per agent:
+//   - opencode: MAX(part.id) WHERE type='step-finish' — monotonic,
+//     never bumps on unrelated touches
+//   - claude, pi: timestamp of the last JSONL entry in the file —
+//     stable for append-only logs
+// Sessions not in the store yet are always ingested. Returns refs as-is
+// on lookup failure (fail open: re-ingest everything).
+func (w *Watcher) filterChangedRefs(ctx context.Context, agent string, refs []SessionRef) ([]SessionRef, error) {
+	if len(refs) == 0 {
+		return refs, nil
 	}
-	existing, err := w.store.GetSession(ctx, ref.Agent, ref.SessionID)
+	stored, err := w.store.GetSessionMTimes(ctx, agent)
 	if err != nil {
-		return false
+		return refs, err
 	}
-	return existing.SourceMTime >= ref.MTime
+	changed := refs[:0:0] // new slice, no aliasing
+	for _, ref := range refs {
+		existing, ok := stored[ref.SessionID]
+		if !ok || existing != ref.MTime {
+			changed = append(changed, ref)
+		}
+	}
+	if w.log != nil && len(refs) != len(changed) {
+		w.log.Printf("%s skip: %d unchanged, %d changed", agent, len(refs)-len(changed), len(changed))
+	}
+	return changed, nil
 }
 
 func (w *Watcher) addRecursive(root string) error {
@@ -174,7 +220,17 @@ func (w *Watcher) addRecursive(root string) error {
 			return nil
 		}
 		if d.IsDir() {
-			if err := w.fsw.Add(path); err != nil {
+			// Snapshot fsw under the lock and bail out if the
+			// watcher has been closed — calling Add on a closed
+			// fsnotify.Watcher panics inside the library.
+			w.mu.Lock()
+			fsw := w.fsw
+			closed := w.closed
+			w.mu.Unlock()
+			if closed || fsw == nil {
+				return filepath.SkipAll
+			}
+			if err := fsw.Add(path); err != nil {
 				w.log.Printf("watch %s: %v", path, err)
 			}
 		}
@@ -212,16 +268,15 @@ func (w *Watcher) processChange(ctx context.Context, path string, kind ChangeKin
 	if sessionID == "" {
 		return
 	}
-	ref := SessionRef{Agent: agent, SessionID: sessionID, Source: path, MTime: nowMs()}
 
 	if kind == Removed {
-		if err := w.store.DeleteSession(ctx, agent, sessionID); err != nil {
-			w.log.Printf("delete %s/%s: %v", agent, sessionID, err)
-			return
-		}
+		// Source file deleted: keep the store row so the user retains
+		// history. Emit a "Removed" event so listeners (cache invalidator
+		// etc.) can react, but never wipe the store.
 		w.emit(SessionEvent{Agent: agent, SessionID: sessionID, Source: path, Kind: Removed, Time: time.Now()})
 		return
 	}
+	ref := SessionRef{Agent: agent, SessionID: sessionID, Source: path, MTime: nowMs()}
 	w.reingestRef(ctx, ref)
 }
 
@@ -239,6 +294,25 @@ func (w *Watcher) reingestRef(ctx context.Context, ref SessionRef) {
 		w.log.Printf("parse %s/%s: %v", ref.Agent, ref.SessionID, err)
 		return
 	}
+	// Carry the per-session change marker through to the store. The
+	// parser doesn't know it (it works on file contents only), so we
+	// overwrite after parsing. Without this the store's source_mtime
+	// would always be 0 and the skip filter would never work.
+	ps.Session.SourceMTime = ref.MTime
+
+	// Empty sessions (e.g. an opencode session that was just opened
+	// and has no step-finish parts yet) are still inserted into the
+	// store so the mtime filter has a baseline to skip them on
+	// subsequent polls. We deliberately do NOT emit a SessionEvent
+	// for them: the web list hides empty sessions (EXISTS in
+	// web_store.go), so cache invalidation and SSE updates for them
+	// would be wasted work. The session will start emitting events as
+	// soon as messages show up.
+	if len(ps.Messages) == 0 {
+		_ = w.store.IngestSession(ctx, ps)
+		return
+	}
+
 	if err := w.store.IngestSession(ctx, ps); err != nil {
 		w.log.Printf("ingest %s/%s: %v", ref.Agent, ref.SessionID, err)
 		return
@@ -248,7 +322,6 @@ func (w *Watcher) reingestRef(ctx context.Context, ref SessionRef) {
 
 func (w *Watcher) pollOpenCode(ctx context.Context, src Source) {
 	var lastMTime int64
-	seen := make(map[string]bool)
 	t := time.NewTicker(w.cfg.OpenCodePoll)
 	defer t.Stop()
 	for {
@@ -274,9 +347,12 @@ func (w *Watcher) pollOpenCode(ctx context.Context, src Source) {
 				w.log.Printf("opencode re-discover: %v", err)
 				continue
 			}
+			refs, err = w.filterChangedRefs(ctx, "opencode", refs)
+			if err != nil {
+				w.log.Printf("opencode filter: %v", err)
+				// continue with original refs (fail open)
+			}
 			for _, ref := range refs {
-				// Always re-ingest on DB mtime change — simpler and idempotent.
-				_ = seen
 				w.reingestRef(ctx, ref)
 			}
 		}
@@ -291,36 +367,64 @@ func (w *Watcher) emit(ev SessionEvent) {
 	}
 }
 
-// Close stops the watcher and releases resources.
+// Close stops the watcher and releases resources. Safe to call
+// concurrently with Run: the closed flag is checked under the same
+// mutex that protects fsw, so addRecursive will see the closure and
+// stop calling fsw.Add on a half-closed fsnotify.Watcher.
 func (w *Watcher) Close() error {
-	if w.fsw != nil {
-		err := w.fsw.Close()
-		w.fsw = nil
-		return err
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return nil
 	}
-	return nil
+	w.closed = true
+	var err error
+	if w.fsw != nil {
+		err = w.fsw.Close()
+		w.fsw = nil
+	}
+	return err
 }
 
 // resolveSessionID returns the (agent, sessionID) for a changed file path.
-// Heuristic: top-level *.jsonl → <id>, pi-style <date>_<id>.jsonl → <id>,
-// pi nested session.jsonl → parent dir name.
+// Must stay in sync with piSource.Discover (and piSessionIDFromPath in the
+// main package) so fsnotify-triggered events carry the same id as the
+// ref that the parser/ingester uses:
+//   - pi session.jsonl: id = grandparent dir name (e.g. <hash>, unique
+//     per sub-agent; using the parent dir "run-0" would collide)
+//   - pi <date>T<time>_<id>.jsonl: id = <id> (the part after the first
+//     underscore; the prefix is a pi timestamp, not a strict date)
+//   - claude *.jsonl: id = filename stem
 func resolveSessionID(path string) (agent, id string) {
 	base := filepath.Base(path)
 	if !strings.HasSuffix(base, ".jsonl") {
 		return "", ""
 	}
 	if base == "session.jsonl" {
-		// pi nested session
-		return "pi", filepath.Base(filepath.Dir(path))
+		return "pi", filepath.Base(filepath.Dir(filepath.Dir(path)))
 	}
 	stem := strings.TrimSuffix(base, ".jsonl")
-	if parts := strings.SplitN(stem, "_", 2); len(parts) == 2 {
-		if _, err := time.Parse("2006-01-02", parts[0]); err == nil {
-			return "pi", parts[1]
+	if idx := strings.Index(stem, "_"); idx > 0 {
+		prefix := stem[:idx]
+		// pi timestamp files look like 2026-06-11T08-30-24-854Z_<id>.jsonl
+		if looksLikePiTimestampPrefix(prefix) {
+			return "pi", stem[idx+1:]
 		}
 	}
 	return "claude", stem
 }
+
+// looksLikePiTimestampPrefix reports whether s starts with a YYYY-MM-DD
+// date — the actual pi timestamp filenames add a "Thh-mm-ss-fffZ" tail,
+// but we only check the date part to keep this heuristic cheap.
+func looksLikePiTimestampPrefix(s string) bool {
+	return len(s) >= 10 && s[4] == '-' && s[7] == '-' &&
+		isASCIIDigit(s[0]) && isASCIIDigit(s[1]) && isASCIIDigit(s[2]) && isASCIIDigit(s[3]) &&
+		isASCIIDigit(s[5]) && isASCIIDigit(s[6]) &&
+		isASCIIDigit(s[8]) && isASCIIDigit(s[9])
+}
+
+func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 
 func dirExists(path string) bool {
 	info, err := os.Stat(path)

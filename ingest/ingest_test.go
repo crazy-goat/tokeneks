@@ -69,7 +69,10 @@ func TestPiSource_DiscoversSessions(t *testing.T) {
 	files := []string{
 		"2026-06-15_aaa.jsonl",
 		"2026-06-15_bbb.jsonl",
-		"sub/session.jsonl", // nested → id = "sub"
+		// nested sub-agent session: grandparent dir holds the unique
+		// hash (the parent "run-0" is the same for every sub-agent
+		// session under the same parent)
+		"sub/abc123/run-0/session.jsonl",
 	}
 	for _, rel := range files {
 		fp := filepath.Join(proj, rel)
@@ -89,7 +92,7 @@ func TestPiSource_DiscoversSessions(t *testing.T) {
 	for _, r := range refs {
 		ids[r.SessionID] = true
 	}
-	for _, want := range []string{"aaa", "bbb", "sub"} {
+	for _, want := range []string{"aaa", "bbb", "abc123"} {
 		if !ids[want] {
 			t.Errorf("missing pi session %q (got %v)", want, ids)
 		}
@@ -189,122 +192,6 @@ func TestIngestor_Sync_ReportsErrors(t *testing.T) {
 	}
 	if res.Errors != 1 {
 		t.Errorf("Errors=%d, want 1", res.Errors)
-	}
-}
-
-func TestIngestor_Sync_CleansUpStaleEmptyRows(t *testing.T) {
-	st := openStore(t)
-
-	// Pre-insert an empty session (stale row).
-	if err := st.UpsertSession(context.Background(), store.Session{
-		Agent: "test", SessionID: "stale", CreatedAt: 1, LastActivity: 1, SourceMTime: 100,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	src := &mockSource{
-		agent: "test",
-		refs: []SessionRef{
-			{Agent: "test", SessionID: "stale", MTime: 100}, // same mtime
-			{Agent: "test", SessionID: "fresh", MTime: 100},
-		},
-	}
-	parser := func(ctx context.Context, ref SessionRef) (store.ParsedSession, error) {
-		if ref.SessionID == "stale" {
-			// Source now has no data.
-			return store.ParsedSession{}, errIngest
-		}
-		return store.ParsedSession{
-			Session: store.Session{Agent: ref.Agent, SessionID: ref.SessionID, CreatedAt: 1, LastActivity: 2, SourceMTime: ref.MTime},
-			Messages: []store.ParsedMessage{
-				{Message: store.Message{Agent: ref.Agent, SessionID: ref.SessionID, MsgIndex: 0, Role: store.RoleUser, Content: "x", CreatedAt: 1}},
-			},
-		}, nil
-	}
-	ing := &Ingestor{
-		Store:     st,
-		Agents:    []string{"test"},
-		SourceFor: map[string]Source{"test": src},
-		ParserFor: map[string]Parser{"test": parser},
-	}
-	res, _ := ing.Sync(context.Background())
-
-	// "stale" should be re-parsed (because it's empty), parser fails, row is deleted.
-	// "fresh" should be ingested normally.
-	if _, err := st.GetSession(context.Background(), "test", "stale"); err == nil {
-		t.Errorf("stale session should have been deleted")
-	}
-	if _, err := st.GetSession(context.Background(), "test", "fresh"); err != nil {
-		t.Errorf("fresh session should exist: %v", err)
-	}
-	if res.Ingested != 1 {
-		t.Errorf("Ingested=%d, want 1", res.Ingested)
-	}
-	if res.Errors != 1 {
-		t.Errorf("Errors=%d, want 1", res.Errors)
-	}
-}
-
-func TestIngestor_Sync_SkipsUnchangedByMTime(t *testing.T) {
-	st := openStore(t)
-
-	// First discovery: mtime=100
-	src := &mockSource{
-		agent: "test",
-		refs:  []SessionRef{{Agent: "test", SessionID: "s1", MTime: 100}},
-	}
-	parser := func(ctx context.Context, ref SessionRef) (store.ParsedSession, error) {
-		return store.ParsedSession{
-			Session: store.Session{Agent: ref.Agent, SessionID: ref.SessionID, CreatedAt: 1, LastActivity: 2, SourceMTime: ref.MTime},
-			Messages: []store.ParsedMessage{
-				{Message: store.Message{Agent: ref.Agent, SessionID: ref.SessionID, MsgIndex: 0, Role: store.RoleUser, Content: "hi", CreatedAt: 1}},
-			},
-		}, nil
-	}
-	ing := &Ingestor{
-		Store:     st,
-		Agents:    []string{"test"},
-		SourceFor: map[string]Source{"test": src},
-		ParserFor: map[string]Parser{"test": parser},
-	}
-
-	// First sync: ingests.
-	res, err := ing.Sync(context.Background())
-	if err != nil {
-		t.Fatalf("first Sync: %v", err)
-	}
-	if res.Ingested != 1 || res.Skipped != 0 {
-		t.Errorf("first sync: %+v, want Ingested=1 Skipped=0", res)
-	}
-
-	// Second sync with same mtime: should skip.
-	res, err = ing.Sync(context.Background())
-	if err != nil {
-		t.Fatalf("second Sync: %v", err)
-	}
-	if res.Ingested != 0 || res.Skipped != 1 {
-		t.Errorf("second sync: %+v, want Ingested=0 Skipped=1", res)
-	}
-
-	// Third sync with newer mtime: should re-ingest.
-	src.refs = []SessionRef{{Agent: "test", SessionID: "s1", MTime: 200}}
-	res, err = ing.Sync(context.Background())
-	if err != nil {
-		t.Fatalf("third Sync: %v", err)
-	}
-	if res.Ingested != 1 || res.Skipped != 0 {
-		t.Errorf("third sync: %+v, want Ingested=1 Skipped=0", res)
-	}
-
-	// Force re-ingest: should re-ingest even with old mtime.
-	src.refs = []SessionRef{{Agent: "test", SessionID: "s1", MTime: 50}}
-	ing.Force = true
-	res, err = ing.Sync(context.Background())
-	if err != nil {
-		t.Fatalf("force Sync: %v", err)
-	}
-	if res.Ingested != 1 {
-		t.Errorf("force sync: %+v, want Ingested=1", res)
 	}
 }
 

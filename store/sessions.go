@@ -7,7 +7,6 @@ import (
 )
 
 // UpsertSession inserts or replaces a session row.
-// ON DELETE CASCADE on the messages table handles the children.
 func (s *Store) UpsertSession(ctx context.Context, sess Session) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO session (agent, session_id, project, parent_id, created_at, last_activity, source_mtime)
@@ -23,14 +22,6 @@ func (s *Store) UpsertSession(ctx context.Context, sess Session) error {
 		return fmt.Errorf("UpsertSession(%s/%s): %w", sess.Agent, sess.SessionID, err)
 	}
 	return nil
-}
-
-// DeleteSession removes a session and cascades to its messages/tool_calls.
-func (s *Store) DeleteSession(ctx context.Context, agent, sessionID string) error {
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM session WHERE agent = ? AND session_id = ?`,
-		agent, sessionID)
-	return err
 }
 
 // SessionFilter narrows GetSessions results.
@@ -82,6 +73,28 @@ func (s *Store) GetSession(ctx context.Context, agent, sessionID string) (Sessio
 		FROM session WHERE agent = ? AND session_id = ?
 	`, agent, sessionID).Scan(&sess.Agent, &sess.SessionID, &sess.Project, &sess.ParentID, &sess.CreatedAt, &sess.LastActivity, &sess.SourceMTime)
 	return sess, err
+}
+
+// GetSessionMTimes returns a map of session_id → source_mtime for every
+// session of one agent. Used by the watcher to decide per-session
+// whether a re-ingest is needed, in a single round-trip to SQLite.
+func (s *Store) GetSessionMTimes(ctx context.Context, agent string) (map[string]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT session_id, source_mtime FROM session WHERE agent = ?`, agent)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]int64)
+	for rows.Next() {
+		var id string
+		var mtime int64
+		if err := rows.Scan(&id, &mtime); err != nil {
+			return nil, err
+		}
+		out[id] = mtime
+	}
+	return out, rows.Err()
 }
 
 // IngestSession replaces a session and all its messages in one transaction.

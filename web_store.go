@@ -50,6 +50,10 @@ func agentDisplayName(agent string) string {
 
 // gatherWebSessionsFromStore returns the list of sessions to display in the
 // web dashboard, computed entirely from the local store.
+// Sessions with no messages are excluded: the watcher keeps them in the
+// store purely as a mtime-filter baseline (so the watcher doesn't keep
+// re-parsing them on every poll), but they're never meant to surface in
+// any list — see ingest/watcher.go reingestRef.
 func gatherWebSessionsFromStore(ctx context.Context, days int) ([]WebSession, error) {
 	st := getTokeneksStore()
 	if st == nil {
@@ -70,6 +74,8 @@ func gatherWebSessionsFromStore(ctx context.Context, days int) ([]WebSession, er
 		FROM session s
 		LEFT JOIN message m ON m.agent = s.agent AND m.session_id = s.session_id
 		WHERE s.last_activity >= ?
+		  AND EXISTS (SELECT 1 FROM message m2
+		              WHERE m2.agent = s.agent AND m2.session_id = s.session_id)
 		GROUP BY s.agent, s.session_id
 		ORDER BY s.last_activity DESC
 	`, cutoff)
@@ -420,6 +426,9 @@ type CLISession struct {
 // aggregateSessionsFromStore returns CLI-ready session summaries for one agent,
 // optionally filtered by date (YYYY-MM-DD) or by a days window.
 // If date is non-empty it takes precedence over days.
+// Sessions with no messages are excluded — the watcher keeps them in the
+// store purely as a mtime-filter baseline (so it doesn't re-parse them on
+// every poll), but they're never meant to surface in any list.
 func aggregateSessionsFromStore(ctx context.Context, agent string, days int, date string) ([]CLISession, error) {
 	st := getTokeneksStore()
 	if st == nil {
@@ -430,10 +439,14 @@ func aggregateSessionsFromStore(ctx context.Context, agent string, days int, dat
 	var where string
 	var args []any
 	if date != "" {
-		where = `WHERE agent = ? AND date(last_activity / 1000, 'unixepoch') = ?`
+		where = `WHERE agent = ? AND date(last_activity / 1000, 'unixepoch') = ?
+		          AND EXISTS (SELECT 1 FROM message m
+		                      WHERE m.agent = s.agent AND m.session_id = s.session_id)`
 		args = []any{agent, date}
 	} else {
-		where = `WHERE agent = ? AND last_activity >= ?`
+		where = `WHERE agent = ? AND last_activity >= ?
+		          AND EXISTS (SELECT 1 FROM message m
+		                      WHERE m.agent = s.agent AND m.session_id = s.session_id)`
 		args = []any{agent, cutoff}
 	}
 

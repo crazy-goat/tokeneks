@@ -141,32 +141,43 @@ func TestIngestSession_ReplacesExisting(t *testing.T) {
 	}
 }
 
-func TestDeleteSession_Cascades(t *testing.T) {
+func TestGetSessionMTimes(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
-	ps := ParsedSession{
-		Session: Session{Agent: "claude", SessionID: "s1", CreatedAt: 1, LastActivity: 2},
-		Messages: []ParsedMessage{
-			{Message: Message{Agent: "claude", SessionID: "s1", MsgIndex: 0, Role: RoleAssistant, CreatedAt: 1},
-				ToolCalls: []ToolCall{{CallID: "c1", Name: "bash"}}},
-		},
+
+	ingest := func(agent, id string, mtime int64) {
+		ps := ParsedSession{
+			Session:  Session{Agent: agent, SessionID: id, CreatedAt: mtime, LastActivity: mtime, SourceMTime: mtime},
+			Messages: []ParsedMessage{{Message: Message{Agent: agent, SessionID: id, MsgIndex: 0, Role: RoleUser, Content: "x", CreatedAt: mtime}}},
+		}
+		if err := st.IngestSession(ctx, ps); err != nil {
+			t.Fatalf("IngestSession(%s/%s): %v", agent, id, err)
+		}
 	}
-	if err := st.IngestSession(ctx, ps); err != nil {
-		t.Fatalf("IngestSession: %v", err)
+	ingest("claude", "a", 100)
+	ingest("claude", "b", 200)
+	ingest("opencode", "x", 300)
+
+	got, err := st.GetSessionMTimes(ctx, "claude")
+	if err != nil {
+		t.Fatalf("GetSessionMTimes: %v", err)
 	}
-	if err := st.DeleteSession(ctx, "claude", "s1"); err != nil {
-		t.Fatalf("DeleteSession: %v", err)
+	if len(got) != 2 || got["a"] != 100 || got["b"] != 200 {
+		t.Errorf("claude mtimes = %+v, want {a:100, b:200}", got)
 	}
-	msgs, _ := st.GetMessages(ctx, "claude", "s1")
-	if len(msgs) != 0 {
-		t.Errorf("after delete len(msgs)=%d, want 0", len(msgs))
+	got, err = st.GetSessionMTimes(ctx, "opencode")
+	if err != nil {
+		t.Fatalf("GetSessionMTimes: %v", err)
 	}
-	var orphanCount int
-	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM tool_call`).Scan(&orphanCount); err != nil {
-		t.Fatalf("query: %v", err)
+	if len(got) != 1 || got["x"] != 300 {
+		t.Errorf("opencode mtimes = %+v, want {x:300}", got)
 	}
-	if orphanCount != 0 {
-		t.Errorf("orphan tool_calls = %d, want 0 (CASCADE failed)", orphanCount)
+	got, err = st.GetSessionMTimes(ctx, "pi")
+	if err != nil {
+		t.Fatalf("GetSessionMTimes: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("pi mtimes = %+v, want empty", got)
 	}
 }
 
