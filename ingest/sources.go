@@ -225,6 +225,20 @@ func fileMTime(path string) int64 {
 	return info.ModTime().UnixMilli()
 }
 
+// dbFileMTime returns the most recent modification time across a SQLite
+// database file and its WAL/SHM sidecars. OpenCode uses WAL mode: new writes
+// land in the -wal file before being checkpointed into the main db, so
+// watching only the main file misses updates that are still in the WAL.
+func dbFileMTime(path string) int64 {
+	t := fileMTime(path)
+	for _, suf := range []string{"-wal", "-shm"} {
+		if mt := fileMTime(path + suf); mt > t {
+			t = mt
+		}
+	}
+	return t
+}
+
 // lastJSONLMessageTime returns the timestamp of the last entry in a
 // JSONL file, parsed as RFC3339 (with nanosecond fallback), or 0 on
 // any error or empty file. The file is assumed to have one JSON object
@@ -282,8 +296,11 @@ func lastJSONLMessageTime(path string) (int64, error) {
 }
 
 // openSQLiteRO opens a sqlite database in read-only mode.
+// We do NOT use _immutable=1: OpenCode uses WAL mode and writes land in the
+// -wal file before being checkpointed into the main db. With _immutable=1
+// SQLite skips the WAL entirely and returns stale data.
 func openSQLiteRO(path string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("file:%s?mode=ro&_immutable=1", path)
+	dsn := fmt.Sprintf("file:%s?mode=ro", path)
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err

@@ -333,11 +333,7 @@ func (w *Watcher) pollOpenCode(ctx context.Context, src Source) {
 			if root == "" {
 				continue
 			}
-			info, err := os.Stat(root)
-			if err != nil {
-				continue
-			}
-			mtime := info.ModTime().UnixMilli()
+			mtime := dbFileMTime(root)
 			if mtime == lastMTime {
 				continue
 			}
