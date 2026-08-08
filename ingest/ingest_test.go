@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 	"tokeneks/store"
 )
 
@@ -57,6 +58,23 @@ func TestClaudeSource_DiscoversSessions(t *testing.T) {
 		if !ids[want] {
 			t.Errorf("missing session %q", want)
 		}
+	}
+}
+
+func TestLastJSONLMessageTime_TrailingNewline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	content := "{\"timestamp\":\"2026-08-03T12:00:00.000Z\"}\n{\"timestamp\":\"2026-08-03T12:01:02.345Z\"}\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := lastJSONLMessageTime(path)
+	if err != nil {
+		t.Fatalf("lastJSONLMessageTime() = %v", err)
+	}
+	want := time.Date(2026, 8, 3, 12, 1, 2, 345000000, time.UTC).UnixMilli()
+	if got != want {
+		t.Fatalf("lastJSONLMessageTime() = %d, want %d", got, want)
 	}
 }
 

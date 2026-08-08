@@ -287,16 +287,15 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 		Date:    time.UnixMilli(sess.CreatedAt).UTC().Format("2006-01-02 15:04"),
 	}
 
-	// Convert messages to steps. Each assistant message is one step.
-	// User/tool messages are merged into the adjacent step's UserPrompt / ToolCalls.
+	// Convert messages to steps. Ingested sessions store each user prompt
+	// immediately before the assistant response it belongs to, so keep it
+	// pending until that assistant message is encountered.
 	steps := []StepInfo{}
+	pendingUserPrompt := ""
 	for _, m := range msgs {
 		switch m.Role {
 		case store.RoleUser:
-			if len(steps) == 0 {
-				continue
-			}
-			steps[len(steps)-1].UserPrompt = m.Content
+			pendingUserPrompt = m.Content
 		case store.RoleAssistant:
 			s := StepInfo{
 				Step:       len(steps) + 1,
@@ -309,8 +308,10 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 				Cost:       m.Cost,
 				Thinking:   m.Thinking,
 				Response:   m.Response,
+				UserPrompt: pendingUserPrompt,
 				StopReason: m.StopReason,
 			}
+			pendingUserPrompt = ""
 			tcs, err := st.GetToolCalls(ctx, m.ID)
 			if err != nil {
 				return nil, err
@@ -325,10 +326,12 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 					DurationMs: tc.DurationMs,
 				})
 				// attach tool result from the matching role=tool message
-				for _, m2 := range msgs {
-					if m2.Role == store.RoleTool && m2.ToolCallID == tc.CallID {
-						s.ToolCalls[len(s.ToolCalls)-1].Output = json.RawMessage(m2.Content)
-						break
+				if tc.CallID != "" {
+					for _, m2 := range msgs {
+						if m2.Role == store.RoleTool && m2.ToolCallID == tc.CallID {
+							s.ToolCalls[len(s.ToolCalls)-1].Output = json.RawMessage(m2.Content)
+							break
+						}
 					}
 				}
 			}

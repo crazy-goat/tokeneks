@@ -264,13 +264,12 @@ func lastJSONLMessageTime(path string) (int64, error) {
 	if _, err := f.ReadAt(buf, off); err != nil {
 		return 0, err
 	}
-	// Trim any leading partial line if we started mid-file.
 	if off > 0 {
 		if i := bytes.IndexByte(buf, '\n'); i >= 0 {
 			buf = buf[i+1:]
 		}
 	}
-	// Find the last newline; everything after it is the last line.
+	buf = bytes.TrimSpace(buf)
 	var lastLine []byte
 	if i := bytes.LastIndexByte(buf, '\n'); i >= 0 {
 		lastLine = buf[i+1:]

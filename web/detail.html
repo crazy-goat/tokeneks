@@ -9,6 +9,14 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; padding: 20px; }
   .page { width: 100%; margin: 0; }
+  .detail-topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 12px; }
+  .export-actions { display: flex; align-items: center; gap: 10px; }
+  .export-option { display: inline-flex; align-items: center; gap: 6px; color: #94a3b8; font-size: 0.78rem; white-space: nowrap; }
+  .export-option input { accent-color: #38bdf8; }
+  .download-button { border: 1px solid #0ea5e9; border-radius: 6px; padding: 7px 11px; background: #0284c7; color: #ffffff; cursor: pointer; font: inherit; font-size: 0.8rem; font-weight: 600; white-space: nowrap; }
+  .download-button:hover { background: #0369a1; }
+  .download-button:focus-visible { outline: 2px solid #7dd3fc; outline-offset: 2px; }
+  @media (max-width: 640px) { .detail-topbar { align-items: flex-start; flex-direction: column; } .export-actions { width: 100%; justify-content: space-between; } }
   a { color: #38bdf8; text-decoration: none; }
   a:hover { text-decoration: underline; }
   h1 { font-size: 1.4rem; margin-bottom: 8px; }
@@ -107,7 +115,13 @@
 </head>
 <body>
 <div class="page">
-<a href="/">← TokenEKS Dashboard</a>
+<div class="detail-topbar">
+  <a href="/">← TokenEKS Dashboard</a>
+  <div class="export-actions">
+    <label class="export-option"><input type="checkbox" id="includeSubagents"> Include subagents</label>
+    <button type="button" class="download-button" id="downloadMarkdown">Download Markdown</button>
+  </div>
+</div>
 <h1 id="title">Session</h1>
 <div class="subtitle" id="subtitle"></div>
 <div class="meta" id="meta"></div>
@@ -159,6 +173,21 @@ let openStepKeys = new Set();
 if (!agent || !id) {
   document.body.innerHTML += '<p style="color:red">Missing agent or id param</p>';
   return;
+}
+
+const downloadMarkdownButton = document.getElementById('downloadMarkdown');
+const includeSubagentsEl = document.getElementById('includeSubagents');
+if (downloadMarkdownButton) {
+  downloadMarkdownButton.addEventListener('click', () => {
+    const includeSubagents = includeSubagentsEl && includeSubagentsEl.checked;
+    const query = includeSubagents ? '?include_subagents=1' : '';
+    const link = document.createElement('a');
+    link.href = `/api/session-markdown/${encodeURIComponent(agent)}/${encodeURIComponent(id)}${query}`;
+    link.download = '';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  });
 }
 
 function cumulate(arr) {

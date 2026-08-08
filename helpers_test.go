@@ -32,6 +32,23 @@ func TestExpandHome_BareTilde(t *testing.T) {
 	}
 }
 
+func TestInitClaudePrices_CurrentModels(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	prices := initClaudePrices()
+	cases := map[string]compute.ModelPrices{
+		"claude-opus-5":             {Input: 5, CacheCreation: 6.25, CacheRead: 0.5, Output: 25, SupportsCacheCreation: true},
+		"claude-opus-4-8":           {Input: 5, CacheCreation: 6.25, CacheRead: 0.5, Output: 25, SupportsCacheCreation: true},
+		"claude-opus-4-7":           {Input: 5, CacheCreation: 6.25, CacheRead: 0.5, Output: 25, SupportsCacheCreation: true},
+		"claude-fable-5":            {Input: 10, CacheCreation: 12.5, CacheRead: 1, Output: 50, SupportsCacheCreation: true},
+		"claude-haiku-4-5-20251001": {Input: 1, CacheCreation: 1.25, CacheRead: 0.1, Output: 5, SupportsCacheCreation: true},
+	}
+	for model, want := range cases {
+		if got := prices[model]; got != want {
+			t.Errorf("price for %s = %+v, want %+v", model, got, want)
+		}
+	}
+}
+
 func TestExpandHome_NoTilde(t *testing.T) {
 	got := expandHome("/absolute/path")
 	want := "/absolute/path"
@@ -215,6 +232,29 @@ func TestWalkSessionFiles_SkipsNonJSONL(t *testing.T) {
 	}
 	if got[0] != validPath {
 		t.Fatalf("walkSessionFiles() collected %q, want %q", got[0], validPath)
+	}
+}
+
+func TestWalkSessionFiles_IncludesNestedJSONL(t *testing.T) {
+	sessionsDir := t.TempDir()
+	nestedDir := filepath.Join(sessionsDir, "project", "session", "subagents")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(nestedDir, "agent-short.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	if err := walkSessionFiles(sessionsDir, func(path string, info os.FileInfo) error {
+		got = append(got, path)
+		return nil
+	}); err != nil {
+		t.Fatalf("walkSessionFiles() = %v", err)
+	}
+	if len(got) != 1 || got[0] != path {
+		t.Fatalf("walkSessionFiles() = %v, want [%s]", got, path)
 	}
 }
 

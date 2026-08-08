@@ -56,7 +56,7 @@ func main() {
 
 	claudeCmd := &cobra.Command{
 		Use:   "claude",
-		Short: "Claude Code sessions (Opus 4.7, Sonnet 4.6)",
+		Short: "Claude Code sessions (Opus 5, Fable 5, Sonnet 5)",
 	}
 	registerAgentCommands(claudeCmd, agents["claude"], "List Claude Code sessions with cache analysis", "detail <session-id|filepath>", "Per-message analysis for a Claude Code session")
 

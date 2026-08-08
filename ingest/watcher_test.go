@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"github.com/fsnotify/fsnotify"
 	"tokeneks/store"
 )
 
@@ -149,6 +150,50 @@ func TestWatcher_EmptySession_StoredButNoEvent(t *testing.T) {
 	}
 }
 
+func TestWatcher_InitialSync_ReingestsExistingSession(t *testing.T) {
+	st := openStore(t)
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "s1.jsonl")
+	if err := os.WriteFile(fp, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.IngestSession(context.Background(), store.ParsedSession{
+		Session: store.Session{Agent: "claude", SessionID: "s1", CreatedAt: 1, LastActivity: 2, SourceMTime: info.ModTime().UnixMilli()},
+		Messages: []store.ParsedMessage{{Message: store.Message{Agent: "claude", SessionID: "s1", MsgIndex: 0, Role: store.RoleUser, Content: "stale", CreatedAt: 1}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var parseCount int32
+	w := NewWatcher(st, map[string]Source{"claude": &fileSource{agent: "claude", root: dir}}, map[string]Parser{
+		"claude": func(ctx context.Context, ref SessionRef) (store.ParsedSession, error) {
+			atomic.AddInt32(&parseCount, 1)
+			return echoParser("fresh")(ctx, ref)
+		},
+	}, WatcherConfig{Debounce: 20 * time.Millisecond})
+	defer w.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	if events := collectEvents(w.Events(), 1, time.Second); len(events) != 1 {
+		t.Fatalf("initial events = %d, want 1", len(events))
+	}
+	if atomic.LoadInt32(&parseCount) != 1 {
+		t.Fatalf("parseCount = %d, want 1", parseCount)
+	}
+	messages, err := st.GetMessages(context.Background(), "claude", "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Content != "fresh" {
+		t.Fatalf("messages = %+v, want fresh message", messages)
+	}
+}
+
 func TestWatcher_FileChange_Reingests(t *testing.T) {
 	st := openStore(t)
 	dir := t.TempDir()
@@ -183,6 +228,32 @@ func TestWatcher_FileChange_Reingests(t *testing.T) {
 
 	if atomic.LoadInt32(&parseCount) < 2 {
 		t.Errorf("parseCount=%d, want >=2 (initial + modify)", parseCount)
+	}
+}
+
+func TestWatcher_Rename_Reingests(t *testing.T) {
+	st := openStore(t)
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "s1.jsonl")
+	if err := os.WriteFile(fp, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var parseCount int32
+	w := NewWatcher(st, map[string]Source{"claude": &fileSource{agent: "claude", root: dir}}, map[string]Parser{
+		"claude": func(ctx context.Context, ref SessionRef) (store.ParsedSession, error) {
+			atomic.AddInt32(&parseCount, 1)
+			return echoParser("renamed")(ctx, ref)
+		},
+	}, WatcherConfig{Debounce: 20 * time.Millisecond})
+	defer w.Close()
+
+	w.handleFSEvent(context.Background(), fsnotify.Event{Name: fp, Op: fsnotify.Rename})
+	events := collectEvents(w.Events(), 1, time.Second)
+	if len(events) != 1 || events[0].SessionID != "s1" || events[0].Kind != Changed {
+		t.Fatalf("events = %+v, want one changed s1 event", events)
+	}
+	if atomic.LoadInt32(&parseCount) != 1 {
+		t.Fatalf("parseCount = %d, want 1", parseCount)
 	}
 }
 

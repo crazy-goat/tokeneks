@@ -36,18 +36,39 @@ func claudeGlobalModelPrices() map[string]compute.ModelPrices {
 
 func initClaudePrices() map[string]compute.ModelPrices {
 	prices := map[string]compute.ModelPrices{
-		"claude-opus-4-7": {
-			Input:                 5.5,
-			CacheCreation:         6.75,
-			CacheRead:             0.55,
-			Output:                27.5,
+		"claude-fable-5": {
+			Input:                 10.0,
+			CacheCreation:         12.5,
+			CacheRead:             1.0,
+			Output:                50.0,
+			SupportsCacheCreation: true,
+		},
+		"claude-opus-5": {
+			Input:                 5.0,
+			CacheCreation:         6.25,
+			CacheRead:             0.5,
+			Output:                25.0,
 			SupportsCacheCreation: true,
 		},
 		"claude-opus-4-8": {
-			Input:                 5.5,
-			CacheCreation:         6.75,
-			CacheRead:             0.55,
-			Output:                27.5,
+			Input:                 5.0,
+			CacheCreation:         6.25,
+			CacheRead:             0.5,
+			Output:                25.0,
+			SupportsCacheCreation: true,
+		},
+		"claude-opus-4-7": {
+			Input:                 5.0,
+			CacheCreation:         6.25,
+			CacheRead:             0.5,
+			Output:                25.0,
+			SupportsCacheCreation: true,
+		},
+		"claude-sonnet-5": {
+			Input:                 2.0,
+			CacheCreation:         2.5,
+			CacheRead:             0.2,
+			Output:                10.0,
 			SupportsCacheCreation: true,
 		},
 		"claude-sonnet-4-6": {
@@ -55,6 +76,20 @@ func initClaudePrices() map[string]compute.ModelPrices {
 			CacheCreation:         3.75,
 			CacheRead:             0.3,
 			Output:                15.0,
+			SupportsCacheCreation: true,
+		},
+		"claude-haiku-4-5-20251001": {
+			Input:                 1.0,
+			CacheCreation:         1.25,
+			CacheRead:             0.1,
+			Output:                5.0,
+			SupportsCacheCreation: true,
+		},
+		"claude-haiku-4-5": {
+			Input:                 1.0,
+			CacheCreation:         1.25,
+			CacheRead:             0.1,
+			Output:                5.0,
 			SupportsCacheCreation: true,
 		},
 	}
@@ -190,20 +225,20 @@ func claudeSessions(days int, date, modelFilter string) ([]claudeSession, error)
 	var sessions []claudeSession
 
 	if err := walkSessionFiles(baseDir, func(fp string, info os.FileInfo) error {
-		if len(filepath.Base(fp)) < 37 { // UUID is 36 chars + .jsonl
-			return nil
-		}
-
-		if date != "" {
-			if info.ModTime().UTC().Format("2006-01-02") != date {
-				return nil
-			}
-		} else if info.ModTime().Before(cutoff) {
-			return nil
-		}
-
 		res, err := claudeMessages(fp)
 		if err != nil || len(res.Models) == 0 {
+			return nil
+		}
+
+		activity := res.LastActivity
+		if activity.IsZero() {
+			activity = info.ModTime()
+		}
+		if date != "" {
+			if activity.UTC().Format("2006-01-02") != date {
+				return nil
+			}
+		} else if activity.Before(cutoff) {
 			return nil
 		}
 
@@ -219,7 +254,7 @@ func claudeSessions(days int, date, modelFilter string) ([]claudeSession, error)
 		sessionName := filepath.Base(fp)
 		sessionID := strings.TrimSuffix(sessionName, ".jsonl")
 		project := cleanClaudeProjectName(filepath.Base(filepath.Dir(fp)))
-		fileDate := info.ModTime().UTC().Format("2006-01-02")
+		fileDate := activity.UTC().Format("2006-01-02")
 		subagentCount := 0
 		if subEntries, err := os.ReadDir(filepath.Join(filepath.Dir(fp), sessionID, "subagents")); err == nil {
 			for _, subEntry := range subEntries {
@@ -238,7 +273,7 @@ func claudeSessions(days int, date, modelFilter string) ([]claudeSession, error)
 			Msgs:          len(res.Models),
 			ToolCalls:     res.ToolCalls,
 			Birth:         getCreatedAtFromInfo(info),
-			LastActivity:  res.LastActivity,
+			LastActivity:  activity,
 			SubagentCount: subagentCount,
 			Data:          &res,
 		})
@@ -450,11 +485,20 @@ func claudeList(days int, date string) error {
 			project = project[:23] + ".."
 		}
 		modelShort := sess.DominantModel
+		if modelShort == "claude-opus-5" {
+			modelShort = "opus-5"
+		}
 		if modelShort == "claude-opus-4-7" {
 			modelShort = "opus-4.7"
 		}
 		if modelShort == "claude-sonnet-4-6" {
 			modelShort = "sonnet-4.6"
+		}
+		if modelShort == "claude-sonnet-5" {
+			modelShort = "sonnet-5"
+		}
+		if modelShort == "claude-fable-5" {
+			modelShort = "fable-5"
 		}
 
 		tokens := s.TotalIn + s.TotalCC + s.TotalCR + s.TotalOut
@@ -472,6 +516,11 @@ func claudeList(days int, date string) error {
 	fmt.Printf("%19s  %-36s  %-14s  %-25s  %4s  %8s  %8.2f  %7.2f  %10.2f  %6.1f%%  %8.2f  %8.2f\n",
 		"TOTAL", "", "", "", "", formatTokens(totalTokens), totalActual, totalIdeal, totalOverpay, pct, totalCostPer1M, totalIdealPer1M)
 	fmt.Println()
+	fmt.Printf("Opus5:    In=$%.2f/M  CC=$%.2f/M  CR=$%.2f/M  Out=$%.2f/M\n",
+		claudeGlobalModelPrices()["claude-opus-5"].Input,
+		claudeGlobalModelPrices()["claude-opus-5"].CacheCreation,
+		claudeGlobalModelPrices()["claude-opus-5"].CacheRead,
+		claudeGlobalModelPrices()["claude-opus-5"].Output)
 	fmt.Printf("Opus4.7:  In=$%.2f/M  CC=$%.2f/M  CR=$%.2f/M  Out=$%.2f/M\n",
 		claudeGlobalModelPrices()["claude-opus-4-7"].Input,
 		claudeGlobalModelPrices()["claude-opus-4-7"].CacheCreation,
@@ -482,6 +531,16 @@ func claudeList(days int, date string) error {
 		claudeGlobalModelPrices()["claude-sonnet-4-6"].CacheCreation,
 		claudeGlobalModelPrices()["claude-sonnet-4-6"].CacheRead,
 		claudeGlobalModelPrices()["claude-sonnet-4-6"].Output)
+	fmt.Printf("Sonnet5:   In=$%.2f/M  CC=$%.2f/M  CR=$%.2f/M  Out=$%.2f/M\n",
+		claudeGlobalModelPrices()["claude-sonnet-5"].Input,
+		claudeGlobalModelPrices()["claude-sonnet-5"].CacheCreation,
+		claudeGlobalModelPrices()["claude-sonnet-5"].CacheRead,
+		claudeGlobalModelPrices()["claude-sonnet-5"].Output)
+	fmt.Printf("Fable5:    In=$%.2f/M  CC=$%.2f/M  CR=$%.2f/M  Out=$%.2f/M\n",
+		claudeGlobalModelPrices()["claude-fable-5"].Input,
+		claudeGlobalModelPrices()["claude-fable-5"].CacheCreation,
+		claudeGlobalModelPrices()["claude-fable-5"].CacheRead,
+		claudeGlobalModelPrices()["claude-fable-5"].Output)
 
 	return nil
 }

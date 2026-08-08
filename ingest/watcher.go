@@ -150,11 +150,6 @@ func (w *Watcher) Run(ctx context.Context) error {
 			w.log.Printf("initial discover %s: %v", agent, err)
 			continue
 		}
-		refs, err = w.filterChangedRefs(ctx, agent, refs)
-		if err != nil {
-			w.log.Printf("filter %s: %v", agent, err)
-			// continue with original refs (fail open)
-		}
 		for _, ref := range refs {
 			w.reingest(ctx, ref)
 		}
@@ -236,10 +231,16 @@ func (w *Watcher) addRecursive(root string) error {
 }
 
 func (w *Watcher) handleFSEvent(ctx context.Context, ev fsnotify.Event) {
+	if ev.Has(fsnotify.Create) && dirExists(ev.Name) {
+		if err := w.addRecursive(ev.Name); err != nil {
+			w.log.Printf("watch %s: %v", ev.Name, err)
+		}
+		return
+	}
 	if !strings.HasSuffix(ev.Name, ".jsonl") {
 		return
 	}
-	if !ev.Has(fsnotify.Write) && !ev.Has(fsnotify.Create) && !ev.Has(fsnotify.Remove) {
+	if !ev.Has(fsnotify.Write) && !ev.Has(fsnotify.Create) && !ev.Has(fsnotify.Remove) && !ev.Has(fsnotify.Rename) {
 		return
 	}
 	kind := Changed

@@ -207,8 +207,10 @@ func fillSessionStats(d *SessionDetail) {
 	d.TotalToolCalls = totalTC
 	d.ToolErrors = toolErrs
 	d.StopReasons = stopReasons
-	// Set model from all unique models found in steps
-	if d.Model == "" && len(modelsOrder) > 0 {
+	// Set model from all unique models found in steps (overrides single session-level model)
+	if len(modelsOrder) > 1 {
+		d.Model = strings.Join(modelsOrder, ", ")
+	} else if d.Model == "" && len(modelsOrder) > 0 {
 		d.Model = strings.Join(modelsOrder, ", ")
 	}
 	// Build model stats array in order of appearance
@@ -426,6 +428,216 @@ func handleAPISessionDetail(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(detail)
 }
 
+func handleAPISessionMarkdown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	agent, id, ok := sessionRequestParts(r.URL.Path, "/api/session-markdown/")
+	if !ok {
+		http.Error(w, "bad path", http.StatusBadRequest)
+		return
+	}
+
+	detail, err := getSessionDetailFromStore(r.Context(), agent, id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(strings.ToLower(err.Error()), "not found") || strings.Contains(err.Error(), "no messages") {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+
+	includeSubagents := r.URL.Query().Get("include_subagents") == "1" || r.URL.Query().Get("include_subagents") == "true"
+	var markdown strings.Builder
+	appendMarkdownSession(&markdown, r.Context(), detail, 1, includeSubagents, make(map[sessKey]bool))
+
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+markdownDownloadFilename(agent, id)+`"`)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write([]byte(markdown.String()))
+}
+
+func appendMarkdownSession(b *strings.Builder, ctx context.Context, detail *SessionDetail, level int, includeSubagents bool, seen map[sessKey]bool) {
+	key := sessKey{agent: strings.ToLower(detail.Agent), id: detail.ID}
+	if seen[key] {
+		return
+	}
+	seen[key] = true
+
+	title := detail.Title
+	if strings.TrimSpace(title) == "" {
+		title = detail.Agent + " session " + detail.ID
+	}
+	fmt.Fprintf(b, "%s %s\n\n", markdownHeading(level), markdownInline(title))
+	if detail.Agent != "" {
+		fmt.Fprintf(b, "- Agent: `%s`\n", markdownCodeInline(detail.Agent))
+	}
+	if detail.ID != "" {
+		fmt.Fprintf(b, "- Session ID: `%s`\n", markdownCodeInline(detail.ID))
+	}
+	if detail.Project != "" {
+		fmt.Fprintf(b, "- Project: `%s`\n", markdownCodeInline(detail.Project))
+	}
+	if detail.Model != "" {
+		fmt.Fprintf(b, "- Model: `%s`\n", markdownCodeInline(detail.Model))
+	}
+	if detail.Date != "" {
+		fmt.Fprintf(b, "- Date: %s\n", markdownInline(detail.Date))
+	}
+	totalCost := detail.TotalCost
+	if totalCost == 0 {
+		for _, step := range detail.Steps {
+			totalCost += step.Cost
+		}
+	}
+	fmt.Fprintf(b, "- Steps: %d\n- Total cost: $%.4f\n\n", len(detail.Steps), totalCost)
+
+	for _, step := range detail.Steps {
+		fmt.Fprintf(b, "%s Step %d\n\n", markdownHeading(level+1), step.Step)
+		if step.Timestamp != "" {
+			fmt.Fprintf(b, "- Timestamp: %s\n", markdownInline(step.Timestamp))
+		}
+		if step.Model != "" {
+			fmt.Fprintf(b, "- Model: `%s`\n", markdownCodeInline(step.Model))
+		}
+		fmt.Fprintf(b, "- Tokens: input %d, output %d, cache read %d, cache write %d\n- Cost: $%.4f\n\n",
+			step.Input, step.Output, step.CacheRead, step.CacheWrite, step.Cost)
+
+		appendMarkdownTextSection(b, level+2, "User prompt", step.UserPrompt)
+		appendMarkdownTextSection(b, level+2, "Thinking", step.Thinking)
+		appendMarkdownTextSection(b, level+2, "Response", step.Response)
+		if step.StopReason != "" {
+			fmt.Fprintf(b, "%s Stop reason\n\n%s\n\n", markdownHeading(level+2), markdownInline(step.StopReason))
+		}
+
+		for _, tool := range step.ToolCalls {
+			name := tool.Name
+			if strings.TrimSpace(name) == "" {
+				name = "unnamed"
+			}
+			fmt.Fprintf(b, "%s Tool: %s\n\n", markdownHeading(level+2), markdownInline(name))
+			if tool.ID != "" {
+				fmt.Fprintf(b, "- Call ID: `%s`\n", markdownCodeInline(tool.ID))
+			}
+			if tool.Status != "" {
+				fmt.Fprintf(b, "- Status: %s\n", markdownInline(tool.Status))
+			}
+			if tool.Error {
+				b.WriteString("- Error: true\n")
+			}
+			if tool.DurationMs > 0 {
+				fmt.Fprintf(b, "- Duration: %d ms\n", tool.DurationMs)
+			}
+			if tool.ID != "" || tool.Status != "" || tool.Error || tool.DurationMs > 0 {
+				b.WriteString("\n")
+			}
+			appendMarkdownCodeSection(b, level+3, "Input", markdownRawValue(tool.Input))
+			appendMarkdownCodeSection(b, level+3, "Output", markdownRawValue(tool.Output))
+		}
+	}
+
+	if !includeSubagents || len(detail.Children) == 0 {
+		return
+	}
+
+	fmt.Fprintf(b, "%s Subagents\n\n", markdownHeading(level+1))
+	for _, child := range detail.Children {
+		childDetail, err := getSessionDetailFromStore(ctx, child.Agent, child.ID)
+		if err != nil {
+			childTitle := child.Title
+			if childTitle == "" {
+				childTitle = child.ID
+			}
+			fmt.Fprintf(b, "%s %s\n\n> Unable to load subagent session: %s\n\n",
+				markdownHeading(level+2), markdownInline(childTitle), markdownInline(err.Error()))
+			continue
+		}
+		appendMarkdownSession(b, ctx, childDetail, level+2, true, seen)
+	}
+}
+
+func appendMarkdownTextSection(b *strings.Builder, level int, label, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	fmt.Fprintf(b, "%s %s\n\n%s\n\n", markdownHeading(level), label, value)
+}
+
+func appendMarkdownCodeSection(b *strings.Builder, level int, label, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	fence := "```"
+	for strings.Contains(value, fence) {
+		fence += "`"
+	}
+	fmt.Fprintf(b, "%s %s\n\n%s\n%s\n%s\n\n", markdownHeading(level), label, fence, value, fence)
+}
+
+func markdownRawValue(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	var value any
+	if json.Unmarshal(raw, &value) == nil {
+		if formatted, err := json.MarshalIndent(value, "", "  "); err == nil {
+			return string(formatted)
+		}
+	}
+	return string(raw)
+}
+
+func markdownHeading(level int) string {
+	if level < 1 {
+		level = 1
+	}
+	return strings.Repeat("#", level)
+}
+
+func markdownInline(value string) string {
+	return strings.NewReplacer(
+		`\`, `\\`,
+		"`", "\\`",
+		"#", "\\#",
+		"*", "\\*",
+		"_", "\\_",
+		"[", "\\[",
+		"]", "\\]",
+	).Replace(value)
+}
+
+func markdownCodeInline(value string) string {
+	return strings.ReplaceAll(value, "`", "\\`")
+}
+
+func markdownDownloadFilename(agent, id string) string {
+	var safe strings.Builder
+	for _, r := range strings.ToLower(agent + "-" + id) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			safe.WriteRune(r)
+		default:
+			safe.WriteRune('-')
+		}
+	}
+	name := strings.Trim(safe.String(), "-.")
+	if name == "" {
+		name = "session"
+	}
+	return "session-" + name + ".md"
+}
+
 func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 	db, err := openOCDB()
 	if err != nil {
@@ -452,16 +664,20 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 		}
 	}
 
-	// preload message roles for this session
-	msgRows, err := db.Query(`SELECT id, json_extract(data, '$.role') as role FROM message WHERE session_id = ?`, sessionID)
+	// preload message roles and per-message model for this session
+	msgRows, err := db.Query(`SELECT id, json_extract(data, '$.role') as role, ifnull(json_extract(data, '$.modelID'), json_extract(data, '$.model.modelID')) as model FROM message WHERE session_id = ?`, sessionID)
 	if err != nil {
 		return nil, err
 	}
 	msgRole := make(map[string]string) // message_id -> role
+	msgModel := make(map[string]string) // message_id -> modelID
 	for msgRows.Next() {
-		var mid, role string
-		if err := msgRows.Scan(&mid, &role); err == nil {
+		var mid, role, modelID string
+		if err := msgRows.Scan(&mid, &role, &modelID); err == nil {
 			msgRole[mid] = role
+			if modelID != "" {
+				msgModel[mid] = modelID
+			}
 		}
 	}
 	msgRows.Close()
@@ -546,15 +762,19 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 			} else {
 				pendingThinking = t
 			}
-		case "step-finish":
-			stopReason := part.Reason
-			if stopReason == "tool-calls" {
-				stopReason = "toolUse"
-			}
-			s := StepInfo{
-				Step:       len(steps) + 1,
-				Timestamp:  time.Unix(ts/1000, (ts%1000)*int64(time.Millisecond)).UTC().Format(time.RFC3339),
-				Model:      modelName,
+	case "step-finish":
+		stopReason := part.Reason
+		if stopReason == "tool-calls" {
+			stopReason = "toolUse"
+		}
+		stepModel := modelName
+		if m, ok := msgModel[msgID]; ok && m != "" {
+			stepModel = m
+		}
+		s := StepInfo{
+			Step:       len(steps) + 1,
+			Timestamp:  time.Unix(ts/1000, (ts%1000)*int64(time.Millisecond)).UTC().Format(time.RFC3339),
+			Model:      stepModel,
 				Input:      part.Tokens.Input,
 				Output:     part.Tokens.Output,
 				CacheRead:  part.Tokens.Cache.Read,
@@ -590,6 +810,7 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 				}
 				tc := ToolCallInfo{
 					Name:   part.Tool,
+					ID:     part.CallID,
 					Input:  input,
 					Output: out,
 					Error:  isErr,
@@ -680,7 +901,6 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 	var steps []StepInfo
 	var title string
 	var lastUserPrompt string
-	var toolCallBuffer []ToolCallInfo
 	toolCallTimes := make(map[string]time.Time) // toolCallId -> assistant msg timestamp
 	parseTS := func(s string) (time.Time, error) {
 		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
@@ -729,6 +949,7 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 				}
 			}
 			tc := ToolCallInfo{
+				ID:     entry.Message.ToolCallID,
 				Name:   entry.Message.ToolName,
 				Output: out,
 				Error:  entry.Message.IsError,
@@ -740,7 +961,22 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 				}
 			}
 			delete(toolCallTimes, entry.Message.ToolCallID)
-			toolCallBuffer = append(toolCallBuffer, tc)
+			for i := len(steps) - 1; i >= 0; i-- {
+				matched := false
+				for j := range steps[i].ToolCalls {
+					if steps[i].ToolCalls[j].ID != tc.ID {
+						continue
+					}
+					steps[i].ToolCalls[j].Output = tc.Output
+					steps[i].ToolCalls[j].Error = tc.Error
+					steps[i].ToolCalls[j].DurationMs = tc.DurationMs
+					matched = true
+					break
+				}
+				if matched {
+					break
+				}
+			}
 			continue
 		}
 		if entry.Message.Model == "" {
@@ -774,6 +1010,7 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 				s.Response = c.Text
 			case "toolCall":
 				s.ToolCalls = append(s.ToolCalls, ToolCallInfo{
+					ID:    c.ID,
 					Name:  c.Name,
 					Input: c.Arguments,
 				})
@@ -783,9 +1020,6 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 				}
 			}
 		}
-		// attach buffered tool results to this step (best-effort)
-		s.ToolCalls = append(s.ToolCalls, toolCallBuffer...)
-		toolCallBuffer = nil
 		steps = append(steps, s)
 	}
 
@@ -913,33 +1147,41 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 		if msg.Type == "user" && msg.Message.Model == "" {
 			if len(msg.Message.Content) > 0 && msg.Message.Content[0] == '[' {
 				var items []struct {
-					Type      string `json:"type"`
-					ToolUseID string `json:"tool_use_id"`
+					Type      string          `json:"type"`
+					ToolUseID string          `json:"tool_use_id"`
+					Content   json.RawMessage `json:"content"`
+					IsError   bool            `json:"is_error"`
 				}
 				if err := json.Unmarshal(msg.Message.Content, &items); err == nil {
 					for _, item := range items {
 						if item.Type != "tool_result" || item.ToolUseID == "" {
 							continue
 						}
-						if startTS, ok := toolCallStart[item.ToolUseID]; ok {
-							if respTS, err := parseTS(msg.Timestamp); err == nil && !startTS.IsZero() {
-								durMs := respTS.Sub(startTS).Milliseconds()
-								for i := len(steps) - 1; i >= 0; i-- {
-									matched := false
-									for j := range steps[i].ToolCalls {
-										if steps[i].ToolCalls[j].ID == item.ToolUseID {
-											steps[i].ToolCalls[j].DurationMs = durMs
-											matched = true
-											break
-										}
-									}
-									if matched {
-										break
-									}
-								}
-							}
-							delete(toolCallStart, item.ToolUseID)
+						var startTS time.Time
+						if ts, ok := toolCallStart[item.ToolUseID]; ok {
+							startTS = ts
 						}
+						for i := len(steps) - 1; i >= 0; i-- {
+							matched := false
+							for j := range steps[i].ToolCalls {
+								if steps[i].ToolCalls[j].ID != item.ToolUseID {
+									continue
+								}
+								if len(item.Content) > 0 {
+									steps[i].ToolCalls[j].Output = item.Content
+								}
+								steps[i].ToolCalls[j].Error = item.IsError
+								if respTS, err := parseTS(msg.Timestamp); err == nil && !startTS.IsZero() {
+									steps[i].ToolCalls[j].DurationMs = respTS.Sub(startTS).Milliseconds()
+								}
+								matched = true
+								break
+							}
+							if matched {
+								break
+							}
+						}
+						delete(toolCallStart, item.ToolUseID)
 					}
 				}
 			} else {

@@ -284,6 +284,7 @@ func runWeb(port string, days int) error {
 
 	mux.HandleFunc("/api/sessions-stream", handleAPISessionsStream)
 	mux.HandleFunc("/api/session/", handleAPISessionDetail)
+	mux.HandleFunc("/api/session-markdown/", handleAPISessionMarkdown)
 	mux.HandleFunc("/api/session-stream/", handleAPISessionStream)
 
 	fmt.Printf("Web dashboard running on http://localhost:%s\n", port)

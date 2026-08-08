@@ -36,33 +36,18 @@ func newJSONLScanner(r io.Reader) *bufio.Scanner {
 // walkSessionFiles walks sessionsDir looking for .jsonl files in subdirectories.
 // For each matching file, it calls fn with the file path and file info.
 func walkSessionFiles(sessionsDir string, fn func(path string, info os.FileInfo) error) error {
-	entries, err := os.ReadDir(sessionsDir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		subEntries, err := os.ReadDir(filepath.Join(sessionsDir, entry.Name()))
+	return filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			continue
-		}
-		for _, fe := range subEntries {
-			if !strings.HasSuffix(fe.Name(), ".jsonl") {
-				continue
-			}
-			info, err := fe.Info()
-			if err != nil {
-				continue
-			}
-			fp := filepath.Join(sessionsDir, entry.Name(), fe.Name())
-			if err := fn(fp, info); err != nil {
+			if path == sessionsDir {
 				return err
 			}
+			return nil
 		}
-	}
-	return nil
+		if info.IsDir() || !strings.HasSuffix(info.Name(), ".jsonl") {
+			return nil
+		}
+		return fn(path, info)
+	})
 }
 
 func expandHome(path string) string {
