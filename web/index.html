@@ -367,11 +367,11 @@ function getSortValue(s) {
   }
 }
 
-function getFilteredSessions() {
+function getFilteredSessions(useHideSubsessions = true) {
   const agents = filterAgent.getValues();
   const providers = filterProvider.getValues();
   const models = filterModel.getValues();
-  const hideSubsessions = document.getElementById('hideSubsessions').checked;
+  const hideSubsessions = useHideSubsessions && document.getElementById('hideSubsessions').checked;
   return allSessions.filter(s => {
     if (hideSubsessions && s.isSubsession) return false;
     if (agents && !agents.includes(s.agent)) return false;
@@ -502,22 +502,23 @@ function renderTable() {
     tbody.appendChild(tr);
   }
 
-  // total row
+  // total row — always includes subsessions, regardless of the hide toggle
   const t = document.createElement('tr');
   t.style.cssText = 'background:#0f172a;font-weight:700;border-top:2px solid #475569';
-  const totMsgs = sum(sorted, s => s.messages);
-  const totTools = sum(sorted, s => s.toolCalls);
-  const totIn = sum(sorted, s => s.totalInput);
-  const totOut = sum(sorted, s => s.totalOutput);
-  const totCR = sum(sorted, s => s.totalCacheRead);
-  const totCW = sum(sorted, s => s.totalCacheWrite);
+  const totalSessions = getFilteredSessions(false);
+  const totMsgs = sum(totalSessions, s => s.messages);
+  const totTools = sum(totalSessions, s => s.toolCalls);
+  const totIn = sum(totalSessions, s => s.totalInput);
+  const totOut = sum(totalSessions, s => s.totalOutput);
+  const totCR = sum(totalSessions, s => s.totalCacheRead);
+  const totCW = sum(totalSessions, s => s.totalCacheWrite);
   const totTokens = totIn + totOut + totCR + totCW;
-  const totCost = sum(sorted, s => s.totalCost);
+  const totCost = sum(totalSessions, s => s.totalCost);
   const cachePct = (totIn + totCR) > 0 ? (totCR / (totIn + totCR) * 100) : 0;
   const costPerM = totTokens > 0 ? totCost / totTokens * 1e6 : 0;
   const cacheColor = cachePct >= 50 ? '#22c55e' : cachePct >= 20 ? '#fbbf24' : '';
   t.innerHTML = [
-    '<td style="color:#94a3b8" colspan="5">TOTAL (' + sorted.length + ' sessions)</td>',
+    '<td style="color:#94a3b8" colspan="5">TOTAL (' + totalSessions.length + ' sessions' + (sorted.length !== totalSessions.length ? ' incl. subsessions' : '') + ')</td>',
     '<td style="text-align:right">' + totMsgs.toLocaleString() + '</td>',
     '<td style="text-align:right">' + totTools.toLocaleString() + '</td>',
     '<td style="text-align:right">' + totIn.toLocaleString() + '</td>',
