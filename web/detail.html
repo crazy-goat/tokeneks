@@ -360,6 +360,7 @@ async function load() {
     <span>Duration: ${d.duration || '–'}</span>
     <span>Steps: ${d.steps.length}</span>
     <span>Total Cost: $${d.totalCost.toFixed(4)}</span>
+    ${(d.totalCostInclChildren && d.totalCostInclChildren > d.totalCost) ? `<span>Total incl. subagents: $${d.totalCostInclChildren.toFixed(4)}</span>` : ''}
   `;
 
   const relationsEl = document.getElementById('relations');
@@ -414,6 +415,13 @@ async function load() {
               </tr>
             `).join('')}
           </tbody>
+          <tfoot>
+            <tr>
+              <td class="row-label" colspan="8">Subtotal (${d.children.length} subsessions, direct)</td>
+              <td class="num">$${d.children.reduce((a, c) => a + (c.totalCost || 0), 0).toFixed(4)}</td>
+              <td class="num"></td>
+            </tr>
+          </tfoot>
         </table>
       </div>
     `);

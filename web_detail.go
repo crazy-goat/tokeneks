@@ -88,6 +88,10 @@ type SessionDetail struct {
 	TotalCost float64       `json:"totalCost"`
 	Parent    *SessionLink  `json:"parent,omitempty"`
 	Children  []SessionLink `json:"children,omitempty"`
+	// TotalCostInclChildren is the cost of this session's own steps plus
+	// the cost of all descendant subsessions (recursively). Not part of
+	// TotalCost so per-session numbers stay comparable across the UI.
+	TotalCostInclChildren float64 `json:"totalCostInclChildren,omitempty"`
 
 	TotalInput      int                `json:"totalInput"`
 	TotalOutput     int                `json:"totalOutput"`
@@ -546,6 +550,7 @@ func appendMarkdownSession(b *strings.Builder, ctx context.Context, detail *Sess
 	}
 
 	fmt.Fprintf(b, "%s Subagents\n\n", markdownHeading(level+1))
+	totalIncl := totalCost
 	for _, child := range detail.Children {
 		childDetail, err := getSessionDetailFromStore(ctx, child.Agent, child.ID)
 		if err != nil {
@@ -555,10 +560,13 @@ func appendMarkdownSession(b *strings.Builder, ctx context.Context, detail *Sess
 			}
 			fmt.Fprintf(b, "%s %s\n\n> Unable to load subagent session: %s\n\n",
 				markdownHeading(level+2), markdownInline(childTitle), markdownInline(err.Error()))
+			totalIncl += child.TotalCost
 			continue
 		}
+		totalIncl += childDetail.TotalCostInclChildren
 		appendMarkdownSession(b, ctx, childDetail, level+2, true, seen)
 	}
+	fmt.Fprintf(b, "**Total cost including subagents: $%.4f**\n\n", totalIncl)
 }
 
 func appendMarkdownTextSection(b *strings.Builder, level int, label, value string) {

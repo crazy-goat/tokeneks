@@ -340,6 +340,12 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 	}
 	detail.Steps = steps
 
+	var totalCost float64
+	for _, s := range steps {
+		totalCost += s.Cost
+	}
+	detail.TotalCost = totalCost
+
 	// children
 	childRows, err := st.DB().QueryContext(ctx, `
 		SELECT s.session_id, COALESCE(s.project, ''),
@@ -372,6 +378,13 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 		}
 	}
 
+	// Aggregate cost of the whole session tree (own steps + all descendant
+	// subsessions, recursively). Kept separate from TotalCost.
+	detail.TotalCostInclChildren = detail.TotalCost
+	for _, child := range detail.Children {
+		detail.TotalCostInclChildren += sessionTreeTotalCost(ctx, st, agent, child.ID)
+	}
+
 	// parent
 	if sess.ParentID != "" {
 		var parentTitle, parentModel string
@@ -390,6 +403,38 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 
 	fillSessionStats(detail)
 	return detail, nil
+}
+
+// sessionTreeTotalCost returns the total cost of a session including all
+// descendant subsessions, recursively. Cycle-safe via the seen set.
+func sessionTreeTotalCost(ctx context.Context, st *store.Store, agent, sessionID string) float64 {
+	return sessionTreeTotalCostDepth(ctx, st, agent, sessionID, make(map[string]bool), 0)
+}
+
+func sessionTreeTotalCostDepth(ctx context.Context, st *store.Store, agent, sessionID string, seen map[string]bool, depth int) float64 {
+	if depth > 32 || seen[sessionID] {
+		return 0
+	}
+	seen[sessionID] = true
+	stats, err := st.SessionStats(ctx, agent, sessionID)
+	if err != nil {
+		return 0
+	}
+	total := stats.TotalCost
+	rows, err := st.DB().QueryContext(ctx,
+		`SELECT session_id FROM session WHERE agent = ? AND parent_id = ?`,
+		agent, sessionID)
+	if err != nil {
+		return total
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var childID string
+		if rows.Scan(&childID) == nil {
+			total += sessionTreeTotalCostDepth(ctx, st, agent, childID, seen, depth+1)
+		}
+	}
+	return total
 }
 
 // sessionRevisionFromStore returns a revision hash for change detection.
