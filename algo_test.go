@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"os"
 	"strings"
@@ -466,5 +467,99 @@ func TestPrintDetailRows_ShowsPerRowModel(t *testing.T) {
 	}
 	if !strings.Contains(out, "model-pricey") {
 		t.Errorf("output missing model-pricey:\n%s", out)
+	}
+}
+
+// Bug: computeDetailRowCosts' categorized "$" totals must add up to the sum
+// of the per-row "$" costs even when rows carry real CacheCreation tokens.
+// Before this fix that only mattered for the showCC=true (Claude) table,
+// which prints a CCCost column; the showCC=false (OpenCode) table's footer
+// dropped CCCost from its printed sum entirely even though every row's own
+// "$" figure (detailRowCost -> compute.PiStepActualCost) already priced the
+// full step including its cache-creation term. This test guards the
+// underlying arithmetic that printDetailRows' footer must reflect regardless
+// of which branch renders it.
+func TestComputeDetailRowCosts_CategoriesSumToRowCosts_WithCacheCreation(t *testing.T) {
+	steps := []compute.StepData{
+		{Input: 2, CacheCreation: 20000, Output: 265},
+		{Input: 1, CacheCreation: 5000, CacheRead: 11911, Output: 1310},
+		{Input: 1, CacheCreation: 2000, CacheRead: 15617, Output: 588},
+	}
+	prices := compute.ModelPrices{Input: 15, CacheCreation: 18.75, CacheRead: 1.5, Output: 75}
+	rows := compute.ComputeIdealClaude(steps, prices)
+	pricing := uniformDetailPricing(len(rows), "claude-opus-test", prices)
+
+	costs, kinds, totals := computeDetailRowCosts(rows, pricing)
+
+	var sumRows float64
+	for i, c := range costs {
+		if kinds[i] != detailRowCostRated {
+			t.Fatalf("row %d kind = %v, want detailRowCostRated", i, kinds[i])
+		}
+		sumRows += c
+	}
+	if sumRows == 0 {
+		t.Fatal("fixture produced zero total cost; test doesn't exercise anything")
+	}
+	if totals.CCCost == 0 {
+		t.Fatal("fixture produced zero CCCost; test doesn't exercise the cache-creation term")
+	}
+
+	categorized := totals.CRCost + totals.CCCost + totals.InCost + totals.OutCost
+	if diff := categorized - sumRows; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("categorized totals (CRCost+CCCost+InCost+OutCost) = %v, want %v (sum of per-row $ costs); "+
+			"a reader summing the printed $ column could not reach this footer", categorized, sumRows)
+	}
+}
+
+// Bug: printDetailRows(rows, pricing, showCC=false) — the call ocDetail makes
+// — used to trust the caller's showCC=false unconditionally, so a session
+// whose steps genuinely wrote to cache (OpenCode's cache_write, selected as
+// CacheCreation) got the narrow table: no c.write column, and a footer "$"
+// line that summed only CRCost+InCost+OutCost. The row's own "$" figure
+// still included the omitted cache-creation cost, so the column could never
+// be summed to the footer. printDetailRows must widen the table itself once
+// any row actually carries CacheCreation, regardless of what the caller
+// believed when it decided showCC.
+func TestPrintDetailRows_WidensTable_WhenCallerPassesShowCCFalseButRowsHaveCacheCreation(t *testing.T) {
+	steps := []compute.StepData{
+		{Input: 2, CacheCreation: 20000, Output: 265},
+		{Input: 1, CacheCreation: 5000, CacheRead: 11911, Output: 1310},
+		{Input: 1, CacheCreation: 2000, CacheRead: 15617, Output: 588},
+	}
+	prices := compute.ModelPrices{Input: 15, CacheCreation: 18.75, CacheRead: 1.5, Output: 75}
+	rows := compute.ComputeIdealClaude(steps, prices)
+	pricing := uniformDetailPricing(len(rows), "claude-opus-test", prices)
+
+	_, _, totals := computeDetailRowCosts(rows, pricing)
+	if totals.CCCost == 0 {
+		t.Fatal("fixture produced zero CCCost; test doesn't exercise the cache-creation term")
+	}
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	// showCC=false mirrors ocDetail's call (opencode.go), which never checks
+	// whether the session actually wrote to cache before deciding the table
+	// shape.
+	printDetailRows(rows, pricing, false)
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "c.write") {
+		t.Fatalf("printDetailRows(showCC=false) did not widen the table for rows with real CacheCreation tokens:\n%s", out)
+	}
+	ccCostStr := fmt.Sprintf("%.2f", totals.CCCost)
+	if !strings.Contains(out, ccCostStr) {
+		t.Errorf("footer is missing the CCCost figure (%s) that the omitted-column table used to drop:\n%s", ccCostStr, out)
 	}
 }

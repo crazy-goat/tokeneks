@@ -192,6 +192,29 @@ func printDetailRowFootnotes(t detailTotals) {
 	}
 }
 
+// rowsHaveCacheCreation reports whether any row actually carries cache-write
+// tokens, regardless of what a caller believes about the agent that produced
+// them.
+//
+// This exists because printDetailRows' narrow (showCC=false) table drops the
+// cache-write column entirely: no c.write token count, and the footer's "$"
+// line only summed CRCost+InCost+OutCost, silently leaving out CCCost. As
+// long as no caller ever had CacheCreation > 0 in the narrow branch that was
+// invisible; OpenCode routinely does (the store selects m.cache_write), so
+// the row's own "$" figure — computeDetailRowCosts calls
+// compute.PiStepActualCost directly, which prices the full step including
+// its cache-creation term — stopped summing to the printed footer, and the
+// reader had no way to see the cache-write tokens they were being charged
+// for at all.
+func rowsHaveCacheCreation(rows []compute.IdealRow) bool {
+	for _, r := range rows {
+		if r.CacheCreation > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // printDetailRows renders the illustrative per-step table for `oc detail`,
 // `pi detail` and `claude detail`. It used to take one compute.ModelPrices
 // and price every row with it — fine as long as a session only ever used
@@ -203,7 +226,18 @@ func printDetailRowFootnotes(t detailTotals) {
 // The Model column exists because a table that keeps mixing models without
 // ever naming them is the exact problem being fixed here — once rows can
 // legitimately show different rates, the reader needs to see why.
+//
+// showCC is the caller's belief about whether the session can carry
+// cache-write tokens at all (Claude: always; PI: only for
+// SupportsCacheCreation models; OpenCode: never asked for it explicitly).
+// That belief is honored but not trusted blindly: it's OR'd with whether any
+// row actually has CacheCreation > 0, so a session that does carry
+// cache-write tokens gets the wide table and the reconciled footer even when
+// the caller didn't think to ask for it (see rowsHaveCacheCreation). A caller
+// that correctly predicted "no cache creation" sees no change at all — this
+// only widens the table, never narrows one a caller asked to see wide.
 func printDetailRows(rows []compute.IdealRow, pricing []detailRowPrice, showCC bool) {
+	showCC = showCC || rowsHaveCacheCreation(rows)
 	costs, kinds, t := computeDetailRowCosts(rows, pricing)
 
 	modelFor := func(i int) string {
