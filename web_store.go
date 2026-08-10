@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -145,6 +146,15 @@ func gatherWebSessionsFromStore(ctx context.Context, days int) ([]WebSession, er
 	if err != nil {
 		return nil, err
 	}
+	// One bulk query for every step of every session in the window, same
+	// reasoning as perModel/toolCounts/childCounts above: a per-session
+	// query here (one per key) is exactly the N+1 pattern that made this
+	// page slow before, just relocated to the ideal-cache computation.
+	stepsByKey, err := sessionStepsForPricing(ctx, st, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	specsByAgent := buildPricingSpecs()
 
 	out := make([]WebSession, 0, len(keys))
 	for _, k := range keys {
@@ -159,9 +169,80 @@ func gatherWebSessionsFromStore(ctx context.Context, days int) ([]WebSession, er
 		if len(ws.Models) > 0 {
 			ws.DominantModel = ws.Models[0].Model
 		}
+		if spec, ok := specsByAgent[k.agent]; ok {
+			applySessionPricing(ws, stepsByKey[k], spec)
+		}
 		out = append(out, *ws)
 	}
 	return out, nil
+}
+
+// applySessionPricing prices one session's steps via computeSessionPricing
+// and fills in ws's Paid/Ideal/Overpay/unpriced fields. TotalCost is
+// overwritten with the freshly computed Paid rather than left at whatever
+// the caller summed straight from the store's cost column — for OpenCode
+// and PI those two already agree (their message.cost IS the logged cost
+// computeSessionPricing prefers), but for Claude the store's cost column is
+// tokeneks' own recomputation as of ingest time, which goes stale the
+// moment `prices update`/`prices derive` changes a rate; computeSessionPricing
+// always re-resolves the rate for "now", so this keeps the dashboard's cost
+// column in agreement with `total` instead of one silently drifting behind
+// the other.
+func applySessionPricing(ws *WebSession, steps []sessionStep, spec agentPricingSpec) {
+	stepPrices := computeSessionPricing(steps, spec.ClaudeStyle, spec.CostIsLogged, spec.PriceFunc)
+	paid, ideal := sumStepPricing(stepPrices)
+	ws.TotalCost = paid
+	ws.Ideal = ideal
+	ws.Overpay = math.Max(paid-ideal, 0)
+	if ideal > 0 {
+		ws.OverpayPct = ws.Overpay / ideal * 100
+	}
+	for _, sp := range stepPrices {
+		if sp.Priced {
+			continue
+		}
+		ws.UnpricedTokens += sp.Tokens
+		ws.PartiallyUnpriced = true
+	}
+}
+
+// sessionStepsForPricing returns, for every session active within the
+// cutoff window, the same per-step data (model, tokens, logged cost,
+// created-at) computeSessionPricing needs — across every agent in one
+// query, so callers over the whole dashboard's session list don't pay for
+// one round trip per session.
+func sessionStepsForPricing(ctx context.Context, st *store.Store, cutoffMs int64) (map[sessKey][]sessionStep, error) {
+	rows, err := st.DB().QueryContext(ctx, `
+		SELECT m.agent, m.session_id, COALESCE(m.model, ''), m.cost, m.created_at,
+		       m.input_tokens, m.cache_read, m.cache_write, m.cache_write_1h, m.output_tokens
+		FROM message m
+		JOIN session s ON s.agent = m.agent AND s.session_id = m.session_id
+		WHERE m.role = 'assistant' AND s.last_activity >= ?
+		ORDER BY m.agent, m.session_id, m.msg_index ASC
+	`, cutoffMs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[sessKey][]sessionStep)
+	for rows.Next() {
+		var agent, id, model string
+		var cost float64
+		var createdAt int64
+		var in, cr, cw, cw1h, o int
+		if err := rows.Scan(&agent, &id, &model, &cost, &createdAt, &in, &cr, &cw, &cw1h, &o); err != nil {
+			return nil, err
+		}
+		k := sessKey{agent, id}
+		out[k] = append(out[k], sessionStep{
+			Model:      model,
+			LoggedCost: cost,
+			CreatedAt:  createdAt,
+			Data:       compute.StepData{Input: in, CacheRead: cr, CacheCreation: cw, CacheCreation1h: cw1h, Output: o},
+		})
+	}
+	return out, rows.Err()
 }
 
 type sessKey struct{ agent, id string }
@@ -292,6 +373,11 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 	// immediately before the assistant response it belongs to, so keep it
 	// pending until that assistant message is encountered.
 	steps := []StepInfo{}
+	// pricingSteps lines up 1:1 with steps (both built from the same
+	// assistant messages, in the same order) — kept separate because
+	// sessionStep is compute's provider-agnostic step shape, not the API's
+	// StepInfo, per sessionStep's own doc comment above.
+	var pricingSteps []sessionStep
 	pendingUserPrompt := ""
 	for _, m := range msgs {
 		switch m.Role {
@@ -338,6 +424,32 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 				}
 			}
 			steps = append(steps, s)
+			pricingSteps = append(pricingSteps, sessionStep{
+				Model:      m.Model,
+				LoggedCost: m.Cost,
+				CreatedAt:  m.CreatedAt,
+				Data:       compute.StepData{Input: m.InputTokens, CacheRead: m.CacheRead, CacheCreation: m.CacheWrite, CacheCreation1h: m.CacheWrite1h, Output: m.OutputTokens},
+			})
+		}
+	}
+
+	// Reprice every step at today's rates rather than trusting the stored
+	// m.Cost column, which for Claude is tokeneks' own ingest-time
+	// recomputation and goes stale the moment `prices update`/`prices
+	// derive` changes a rate — see applySessionPricing for the parallel
+	// reasoning on the session-list side. This also fills in Ideal/Overpay,
+	// which the stored column has no equivalent for at all.
+	if spec, ok := buildPricingSpecs()[agent]; ok {
+		stepPrices := computeSessionPricing(pricingSteps, spec.ClaudeStyle, spec.CostIsLogged, spec.PriceFunc)
+		for i, sp := range stepPrices {
+			steps[i].Cost = sp.Paid
+			steps[i].Ideal = sp.Ideal
+			detail.Ideal += sp.Ideal
+			if sp.Priced {
+				continue
+			}
+			detail.UnpricedTokens += sp.Tokens
+			detail.PartiallyUnpriced = true
 		}
 	}
 	detail.Steps = steps
@@ -347,6 +459,10 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 		totalCost += s.Cost
 	}
 	detail.TotalCost = totalCost
+	detail.Overpay = math.Max(detail.TotalCost-detail.Ideal, 0)
+	if detail.Ideal > 0 {
+		detail.OverpayPct = detail.Overpay / detail.Ideal * 100
+	}
 
 	// children
 	childRows, err := st.DB().QueryContext(ctx, `
@@ -486,6 +602,147 @@ type CLISession struct {
 	CacheRead    int
 	CacheWrite   int
 	Steps        []sessionStep
+}
+
+// stepPricing is one step's own Paid and Ideal contribution — the per-step
+// output of computeSessionPricing. It carries enough detail that both
+// totalsByAgent's per-model "unpriced" report and the web dashboard's
+// per-session Ideal/Overpay can be built directly from a slice of these,
+// without either one re-deriving pricing from the input steps itself.
+type stepPricing struct {
+	Model string
+	Paid  float64
+	Ideal float64
+	// Priced is false when Model had no resolvable rate at the time this
+	// step ran. Paid/Ideal are still populated in that case whenever the
+	// step's agent logs its own cost and did so for this step: both are set
+	// to that logged cost, mirroring a real bill at zero overpay (see
+	// unpricedModel in main.go). Otherwise Paid/Ideal are 0 — the step
+	// carries no cost information at all and callers should exclude it.
+	Priced     bool
+	LoggedCost float64
+	// Tokens is Input+CacheCreation+CacheRead+Output for this step. Only
+	// meaningful when !Priced — it's what totalsByAgent's unpriced report
+	// counts.
+	Tokens int
+}
+
+// computeSessionPricing prices one session's steps, in the order they
+// actually happened, and returns one stepPricing per step. It is the shared
+// engine behind totalsByAgent (the `total` CLI command, see its doc comment
+// in main.go for the full rationale) and the web dashboard's session
+// list/detail views, so the two surfaces can never disagree about a
+// session's Paid/Ideal. In short, this function must never:
+//
+//   - split steps by model before running the ideal-cache algorithm — that
+//     throws away the carried-forward cache state at every model switch,
+//     inflating Ideal and producing the impossible Paid < Ideal;
+//   - price a step at any rate but its own model's, resolved at its own
+//     CreatedAt rather than "the current rate";
+//   - invent a rate for a model priceFunc doesn't know about.
+func computeSessionPricing(steps []sessionStep, claudeStyle, costIsLogged bool, priceFunc func(model string, at int64) (compute.ModelPrices, bool)) []stepPricing {
+	if len(steps) == 0 {
+		return nil
+	}
+	tokens := make([]compute.StepData, len(steps))
+	for i, s := range steps {
+		tokens[i] = s.Data
+	}
+
+	// ComputeIdealClaude's prices argument only shapes the IdealCC/IdealIn
+	// split (which depends on CacheCreation, not on any rate), so a
+	// zero-value table here is fine — real pricing happens per row below.
+	var idealRows []compute.IdealRow
+	if claudeStyle {
+		idealRows = compute.ComputeIdealClaude(tokens, compute.ModelPrices{})
+	} else {
+		idealRows = compute.ComputeIdeal(tokens)
+	}
+
+	out := make([]stepPricing, len(idealRows))
+	for i, row := range idealRows {
+		s := steps[i]
+		prices, priced := priceFunc(s.Model, s.CreatedAt)
+		if !priced {
+			sp := stepPricing{Model: s.Model, Tokens: row.Input + row.CacheCreation + row.CacheRead + row.Output}
+			if costIsLogged && s.LoggedCost > 0 {
+				sp.LoggedCost = s.LoggedCost
+				sp.Paid = s.LoggedCost
+				sp.Ideal = s.LoggedCost
+			}
+			out[i] = sp
+			continue
+		}
+
+		// IdealCC is a synthetic re-derivation with no real 5m/1h split, so
+		// — same convention as compute.Summarize — it's priced entirely at
+		// the 5m rate (CacheCreation1h left at 0).
+		idealStep := compute.StepData{Input: row.IdealIn, CacheCreation: row.IdealCC, CacheRead: row.IdealCR, Output: row.Output}
+		paid := compute.PiStepActualCost(s.Data, prices)
+		if costIsLogged && s.LoggedCost > 0 {
+			paid = s.LoggedCost
+		}
+		out[i] = stepPricing{Model: s.Model, Paid: paid, Ideal: compute.PiStepActualCost(idealStep, prices), Priced: true}
+	}
+	return out
+}
+
+// sumStepPricing adds up Paid and Ideal across one session's per-step
+// pricing.
+func sumStepPricing(steps []stepPricing) (paid, ideal float64) {
+	for _, s := range steps {
+		paid += s.Paid
+		ideal += s.Ideal
+	}
+	return paid, ideal
+}
+
+// agentPricingSpec is what computeSessionPricing needs to price one agent's
+// steps correctly: how to resolve a model's rate at a given time, whether
+// the ideal-cache carry-forward is Claude-style, and whether this agent logs
+// its own real billed cost per step (see totalsByAgent's doc comment in
+// main.go). It's the single place mapping a store agent name to its pricing
+// rules, so totalsByAgent and the web dashboard can never disagree about
+// which table/style/logged-cost-preference applies to a given session.
+type agentPricingSpec struct {
+	Label        string // row label used by `total` ("OC", "PI", "CLAUDE")
+	PriceFunc    func(model string, at int64) (compute.ModelPrices, bool)
+	ClaudeStyle  bool
+	CostIsLogged bool
+}
+
+// buildPricingSpecs returns the pricing rules for every agent, keyed by the
+// store's lowercase agent name ("opencode", "pi", "claude").
+//
+// claudeGlobalModelPrices rebuilds its map from memoized overlays on every
+// call — fine done once per report/request, wasteful done once per session
+// or step, so it's resolved once here rather than inside the returned
+// PriceFunc closures.
+func buildPricingSpecs() map[string]agentPricingSpec {
+	claudePrices := claudeGlobalModelPrices()
+	return map[string]agentPricingSpec{
+		"opencode": {
+			Label:        "OC",
+			PriceFunc:    func(m string, at int64) (compute.ModelPrices, bool) { return resolveAgentPricesAt("opencode", m, at) },
+			ClaudeStyle:  false,
+			CostIsLogged: true,
+		},
+		"pi": {
+			Label:        "PI",
+			PriceFunc:    func(m string, at int64) (compute.ModelPrices, bool) { return resolveAgentPricesAt("pi", m, at) },
+			ClaudeStyle:  true,
+			CostIsLogged: true,
+		},
+		"claude": {
+			Label: "CLAUDE",
+			PriceFunc: func(m string, _ int64) (compute.ModelPrices, bool) {
+				p, ok := claudePrices[m]
+				return p, ok && p.Input > 0
+			},
+			ClaudeStyle:  true,
+			CostIsLogged: false,
+		},
+	}
 }
 
 // sessionStep is one assistant message: its token usage, the model that

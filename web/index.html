@@ -45,6 +45,9 @@
   .model-name { font-weight: 600; min-width: 130px; }
   .cost { font-weight: 700; color: #ffffff; white-space: nowrap; }
   .small { color: #94a3b8; font-size: 0.75rem; white-space: nowrap; }
+  .overpay { font-weight: 700; white-space: nowrap; }
+  .overpay-pct { font-size: 0.75rem; font-weight: 400; margin-left: 4px; }
+  .unpriced-flag { color: #fbbf24; font-weight: 700; margin-left: 5px; cursor: help; }
   .session-row td { border-bottom: 1px solid #334155; }
   .session-row { cursor: pointer; }
   canvas { max-height: 300px; }
@@ -114,7 +117,9 @@
 <th class="sortable" data-sort="cacheW">Cache W <span class="sort-arrow">↕</span></th>
 <th class="sortable" data-sort="cachePct">Cache % <span class="sort-arrow">↕</span></th>
 <th class="sortable" data-sort="total">Total <span class="sort-arrow">↕</span></th>
-<th class="sortable" data-sort="cost">Cost <span class="sort-arrow">↕</span></th>
+<th class="sortable" data-sort="cost">Paid <span class="sort-arrow">↕</span></th>
+<th class="sortable" data-sort="ideal">Ideal <span class="sort-arrow">↕</span></th>
+<th class="sortable" data-sort="overpay">Overpay <span class="sort-arrow">↕</span></th>
 <th class="sortable" data-sort="costPerM">$/1M <span class="sort-arrow">↕</span></th>
 </tr>
 </thead>
@@ -342,11 +347,71 @@ function modelDisplay(m) {
 
 function sum(arr, fn) { return arr.reduce((a, b) => a + fn(b), 0); }
 
+// renderSummary rebuilds the top summary cards from the full (unfiltered by
+// agent/model, only by date range) session list, same scope as the existing
+// Total Cost card — so these numbers are the ones that should agree with
+// `go run . total` for the same window. Shared by loadData/refreshData so
+// the two code paths can't drift into showing different card sets.
+function renderSummary(sessions) {
+  const totalCost = sum(sessions, s => s.totalCost);
+  const totalIdeal = sum(sessions, s => s.ideal || 0);
+  const totalOverpay = sum(sessions, s => s.overpay || 0);
+  const totalOverpayPct = totalIdeal > 0 ? totalOverpay / totalIdeal * 100 : 0;
+  const anyPartial = sessions.some(s => s.partiallyUnpriced);
+  const totalInput = sum(sessions, s => s.totalInput);
+  const totalOutput = sum(sessions, s => s.totalOutput);
+  const totalCR = sum(sessions, s => s.totalCacheRead);
+  const totalCW = sum(sessions, s => s.totalCacheWrite);
+  const totalMsgs = sum(sessions, s => s.messages);
+  const totalToolCalls = sum(sessions, s => s.toolCalls);
+
+  const overpayColor = totalOverpay <= 0.0001 ? '#38bdf8' : totalOverpayPct >= 20 ? '#f87171' : totalOverpayPct >= 5 ? '#fbbf24' : '#38bdf8';
+  const cards = [
+    { label: 'Paid', value: '$'+totalCost.toFixed(2) },
+    { label: 'Ideal', value: '$'+totalIdeal.toFixed(2) },
+    { label: 'Overpay', value: `<span style="color:${overpayColor}">$${totalOverpay.toFixed(2)}</span>` +
+        `<span style="font-size:0.6em;color:#94a3b8"> (${totalOverpayPct.toFixed(1)}%)</span>` +
+        (anyPartial ? ` <span class="unpriced-flag" title="one or more sessions has a step with no resolvable rate — overpay is a lower bound">⚠</span>` : '') },
+    { label: 'Input Tokens', value: totalInput.toLocaleString() },
+    { label: 'Output Tokens', value: totalOutput.toLocaleString() },
+    { label: 'Cache Read', value: totalCR.toLocaleString() },
+    { label: 'Cache Write', value: totalCW.toLocaleString() },
+    { label: 'Messages', value: totalMsgs.toLocaleString() },
+    { label: 'Tool Calls', value: totalToolCalls.toLocaleString() },
+    { label: 'Sessions', value: sessions.length.toLocaleString() },
+  ];
+  document.getElementById('summary').innerHTML = cards.map(c => `<div class="card"><div class="value">${c.value}</div><div class="label">${c.label}</div></div>`).join('');
+}
+
 function cachePctHtml(s) {
   const cr = s.totalCacheRead, inp = s.totalInput;
   const pct = (inp + cr) > 0 ? cr / (inp + cr) * 100 : 0;
   const cls = pct >= 50 ? 'color:#22c55e' : pct >= 20 ? 'color:#fbbf24' : '';
   return `<span style="${cls};font-weight:600">${pct.toFixed(1)}%</span>`;
+}
+
+// unpricedTitle builds the tooltip for the "⚠" marker shown next to a
+// partially-unpriced session's Overpay. Overpay for such a session is a
+// lower bound, not a measured figure: tokens whose model has no resolvable
+// rate are either counted at an assumed zero overpay (when the agent logged
+// a real cost for them) or missing from Paid/Ideal entirely (when it
+// didn't) — see unpricedModel in main.go.
+function unpricedTitle(s) {
+  return `${(s.unpricedTokens || 0).toLocaleString()} tokens have no resolvable rate; ` +
+    `Overpay for this session is a lower bound, not a measured figure.`;
+}
+
+// overpayHtml renders a session's Overpay as both a dollar amount and a
+// percentage of Ideal — the percentage alone hides how much money is
+// actually on the table for small sessions, and the dollar amount alone
+// hides how bad the ratio is for expensive ones. Sessions with any
+// unpriced step get a warning marker rather than reading as a clean number.
+function overpayHtml(s) {
+  const overpay = s.overpay || 0;
+  const pct = s.overpayPct || 0;
+  const cls = overpay <= 0.0001 ? 'color:#64748b' : pct >= 20 ? 'color:#f87171' : pct >= 5 ? 'color:#fbbf24' : 'color:#e2e8f0';
+  const flag = s.partiallyUnpriced ? `<span class="unpriced-flag" title="${escHtml(unpricedTitle(s))}">⚠</span>` : '';
+  return `<span class="overpay" style="${cls}">$${overpay.toFixed(4)}<span class="overpay-pct">(${pct.toFixed(1)}%)</span></span>${flag}`;
 }
 
 function getSortValue(s) {
@@ -362,6 +427,8 @@ function getSortValue(s) {
     case 'msgs': return s.messages;
     case 'tools': return s.toolCalls;
     case 'cost': return s.totalCost;
+    case 'ideal': return s.ideal || 0;
+    case 'overpay': return s.overpay || 0;
     case 'costPerM': { const t = s.totalInput + s.totalOutput + s.totalCacheRead + s.totalCacheWrite; return t > 0 ? s.totalCost / t * 1e6 : 0; }
     default: return 0;
   }
@@ -419,7 +486,7 @@ function renderTable() {
   function aggregateWithChildren(session, seen = new Set()) {
     const key = `${session.agent}:${session.id}`;
     if (seen.has(key)) {
-      return { messages: 0, toolCalls: 0, promptInput: 0, totalOutput: 0, totalCacheRead: 0, totalCacheWrite: 0, totalCost: 0, totalTokens: 0, childCount: 0 };
+      return { messages: 0, toolCalls: 0, promptInput: 0, totalOutput: 0, totalCacheRead: 0, totalCacheWrite: 0, totalCost: 0, ideal: 0, overpay: 0, totalTokens: 0, childCount: 0 };
     }
     seen.add(key);
     const total = {
@@ -430,6 +497,8 @@ function renderTable() {
       totalCacheRead: session.totalCacheRead || 0,
       totalCacheWrite: session.totalCacheWrite || 0,
       totalCost: session.totalCost || 0,
+      ideal: session.ideal || 0,
+      overpay: session.overpay || 0,
       totalTokens: (session.totalInput || 0) + (session.totalOutput || 0) + (session.totalCacheRead || 0) + (session.totalCacheWrite || 0),
       childCount: 0,
     };
@@ -442,6 +511,8 @@ function renderTable() {
       total.totalCacheRead += childAgg.totalCacheRead;
       total.totalCacheWrite += childAgg.totalCacheWrite;
       total.totalCost += childAgg.totalCost;
+      total.ideal += childAgg.ideal;
+      total.overpay += childAgg.overpay;
       total.totalTokens += childAgg.totalTokens;
       total.childCount += 1 + childAgg.childCount;
     }
@@ -496,6 +567,8 @@ function renderTable() {
       <td>${sub(cachePctHtml(s), '')}</td>
       <td>${sub(mainTotalTokens.toLocaleString(), aggregate ? aggregate.totalTokens.toLocaleString() : '')}</td>
       <td class="cost">${sub(`$${s.totalCost.toFixed(2)}`, aggregate ? `$${aggregate.totalCost.toFixed(2)}` : '', true)}</td>
+      <td>${sub(`$${(s.ideal || 0).toFixed(2)}`, aggregate ? `$${aggregate.ideal.toFixed(2)}` : '')}</td>
+      <td>${sub(overpayHtml(s), '')}</td>
       <td class="small">${sub(`$${mainCostPerM.toFixed(2)}`, aggregate ? `$${(aggregate.totalTokens > 0 ? aggregate.totalCost / aggregate.totalTokens * 1e6 : 0).toFixed(2)}` : '', true)}</td>
     `;
     tr.addEventListener('click', () => { window.location.href = `/detail?agent=${encodeURIComponent(s.agent)}&id=${encodeURIComponent(s.id)}`; });
@@ -514,9 +587,14 @@ function renderTable() {
   const totCW = sum(totalSessions, s => s.totalCacheWrite);
   const totTokens = totIn + totOut + totCR + totCW;
   const totCost = sum(totalSessions, s => s.totalCost);
+  const totIdeal = sum(totalSessions, s => s.ideal || 0);
+  const totOverpay = sum(totalSessions, s => s.overpay || 0);
+  const totOverpayPct = totIdeal > 0 ? totOverpay / totIdeal * 100 : 0;
+  const totPartial = totalSessions.some(s => s.partiallyUnpriced);
   const cachePct = (totIn + totCR) > 0 ? (totCR / (totIn + totCR) * 100) : 0;
   const costPerM = totTokens > 0 ? totCost / totTokens * 1e6 : 0;
   const cacheColor = cachePct >= 50 ? '#22c55e' : cachePct >= 20 ? '#fbbf24' : '';
+  const overpayColor = totOverpay <= 0.0001 ? '#64748b' : totOverpayPct >= 20 ? '#f87171' : totOverpayPct >= 5 ? '#fbbf24' : '#fff';
   t.innerHTML = [
     '<td style="color:#94a3b8" colspan="5">TOTAL (' + totalSessions.length + ' sessions' + (sorted.length !== totalSessions.length ? ' incl. subsessions' : '') + ')</td>',
     '<td style="text-align:right">' + totMsgs.toLocaleString() + '</td>',
@@ -528,6 +606,8 @@ function renderTable() {
     '<td style="text-align:right"><span style="color:' + cacheColor + ';font-weight:600">' + cachePct.toFixed(1) + '%</span></td>',
     '<td style="text-align:right">' + totTokens.toLocaleString() + '</td>',
     '<td style="text-align:right;font-weight:700;color:#fff">$' + totCost.toFixed(2) + '</td>',
+    '<td style="text-align:right">$' + totIdeal.toFixed(2) + '</td>',
+    '<td style="text-align:right;font-weight:700;color:' + overpayColor + '">$' + totOverpay.toFixed(2) + ' (' + totOverpayPct.toFixed(1) + '%)' + (totPartial ? ' <span class="unpriced-flag" title="one or more totaled sessions has a step with no resolvable rate">⚠</span>' : '') + '</td>',
     '<td style="text-align:right;color:#94a3b8">$' + costPerM.toFixed(2) + '</td>',
   ].join('');
   tbody.appendChild(t);
@@ -554,28 +634,7 @@ async function loadData() {
   allSessions = await res.json();
 
   populateFilters();
-
-  const totalCost = sum(allSessions, s => s.totalCost);
-  const totalInput = sum(allSessions, s => s.totalInput);
-  const totalOutput = sum(allSessions, s => s.totalOutput);
-  const totalCR = sum(allSessions, s => s.totalCacheRead);
-  const totalCW = sum(allSessions, s => s.totalCacheWrite);
-  const totalMsgs = sum(allSessions, s => s.messages);
-  const totalToolCalls = sum(allSessions, s => s.toolCalls);
-
-  const summaryEl = document.getElementById('summary');
-  const cards = [
-    { label: 'Total Cost', value: '$'+totalCost.toFixed(2) },
-    { label: 'Input Tokens', value: totalInput.toLocaleString() },
-    { label: 'Output Tokens', value: totalOutput.toLocaleString() },
-    { label: 'Cache Read', value: totalCR.toLocaleString() },
-    { label: 'Cache Write', value: totalCW.toLocaleString() },
-    { label: 'Messages', value: totalMsgs.toLocaleString() },
-    { label: 'Tool Calls', value: totalToolCalls.toLocaleString() },
-    { label: 'Sessions', value: allSessions.length.toLocaleString() },
-  ];
-  summaryEl.innerHTML = cards.map(c => `<div class="card"><div class="value">${c.value}</div><div class="label">${c.label}</div></div>`).join('');
-
+  renderSummary(allSessions);
   renderTable();
 
   const byAgent = {};
@@ -712,25 +771,7 @@ async function refreshData() {
 
   populateFilters();
   renderTable();
-
-  const totalCost = sum(allSessions, s => s.totalCost);
-  const totalInput = sum(allSessions, s => s.totalInput);
-  const totalOutput = sum(allSessions, s => s.totalOutput);
-  const totalCR = sum(allSessions, s => s.totalCacheRead);
-  const totalCW = sum(allSessions, s => s.totalCacheWrite);
-  const totalMsgs = sum(allSessions, s => s.messages);
-  const totalToolCalls = sum(allSessions, s => s.toolCalls);
-
-  document.getElementById('summary').innerHTML = [
-    { label: 'Total Cost', value: '$'+totalCost.toFixed(2) },
-    { label: 'Input Tokens', value: totalInput.toLocaleString() },
-    { label: 'Output Tokens', value: totalOutput.toLocaleString() },
-    { label: 'Cache Read', value: totalCR.toLocaleString() },
-    { label: 'Cache Write', value: totalCW.toLocaleString() },
-    { label: 'Messages', value: totalMsgs.toLocaleString() },
-    { label: 'Tool Calls', value: totalToolCalls.toLocaleString() },
-    { label: 'Sessions', value: allSessions.length.toLocaleString() },
-  ].map(c => `<div class="card"><div class="value">${c.value}</div><div class="label">${c.label}</div></div>`).join('');
+  renderSummary(allSessions);
 
   const byAgent = {};
   const byAgentTokens = {};

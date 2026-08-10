@@ -6,8 +6,6 @@ import (
 	"os"
 	"sort"
 
-	"tokeneks/compute"
-
 	"github.com/spf13/cobra"
 )
 
@@ -237,10 +235,13 @@ type unpricedModel struct {
 	Tokens int
 	Steps  int
 	// LoggedCost is what the agent's own log says these steps cost. It is
-	// only known for agents that log a cost (PI, OpenCode) and is reported
-	// so the warning can say how much money is missing, not just how many
-	// tokens — but it is not folded into the totals, because without rates
-	// there is no matching Ideal to compare it against.
+	// only known for agents that log a cost (PI, OpenCode). Where it exists
+	// it still counts toward Actual — a spent dollar is a fact, and dropping
+	// it would make the Paid column disagree with the provider's own bill
+	// over a missing rate. Ideal has no such fallback (it is a
+	// counterfactual), so these steps are booked at Ideal == LoggedCost,
+	// i.e. assumed to have no overpay. That slightly understates the overpay
+	// percentage, which is the safe direction: it never invents savings.
 	LoggedCost float64
 }
 
@@ -255,84 +256,64 @@ var piPricesFunc = piGlobalModelPrices
 // is the whole computation, kept separate from printTotal's formatting so
 // it can be tested directly.
 //
-// The ideal-cache algorithm (ComputeIdeal/ComputeIdealClaude) models one
-// continuous conversation: each step's ideal cache read is derived from how
-// much of the *previous step's* context could have been reused, and that
-// running pointer carries forward step to step. So it always runs once per
-// session over the session's full, untouched step order — splitting the
-// session by model first (which an earlier version of this function did)
-// throws that carried-forward state away at every model switch, which
-// makes "ideal" assume a cold start right there and can inflate it past the
-// real Actual cost. That produces exactly the impossible Paid<Ideal output
-// this function exists to fix, just relocated rather than fixed.
+// The per-session pricing itself — running the ideal-cache algorithm once
+// over each session's full, untouched step order, then pricing each
+// resulting row at its own step's model rate — lives in
+// computeSessionPricing (web_store.go). That function is also what the web
+// dashboard's session list/detail views use, so the two surfaces can never
+// disagree about a session's Paid/Ideal. See its doc comment for the rules
+// it must preserve; the summary here is the "why":
 //
-// What model pricing actually needs — sessions routinely switch models
-// mid-run, so pricing a whole session at its first message's rate (the old
-// behavior) silently mispriced any session that switched — is applied
-// afterward, per row: each IdealRow already lines up 1:1 with the step that
-// produced it, so its $ cost uses that step's own model rate instead of
-// pooling raw token counts across models into one Summarize call (which
-// only accepts a single price for the whole set).
-//
-// Paid prefers what the agent logged over what tokeneks can recompute. PI
-// and OpenCode record the provider's own billed figure per message, which
-// is authoritative: it already accounts for rate changes, discounts and
-// tiers that a static rate table cannot know about, and it stays correct
-// for models the table has since lost. Rates are the fallback for steps
-// with no logged cost. Ideal is always computed from rates — it is a
-// counterfactual, so there is nothing logged to read it from.
+//   - The ideal-cache algorithm models one continuous conversation: each
+//     step's ideal cache read is derived from how much of the *previous
+//     step's* context could have been reused, and that running pointer
+//     carries forward step to step. Splitting a session by model before
+//     running it (which an earlier version of this function did) throws
+//     that carried-forward state away at every model switch, which makes
+//     "ideal" assume a cold start right there and can inflate it past the
+//     real Actual cost — the impossible Paid<Ideal output this function
+//     exists to fix, just relocated rather than fixed.
+//   - Sessions routinely switch models mid-run, so pricing a whole session
+//     at its first message's rate (the old behavior) silently mispriced
+//     any session that switched — each row is priced at its own model's
+//     rate instead.
+//   - Paid prefers what the agent logged over what tokeneks can recompute.
+//     PI and OpenCode record the provider's own billed figure per message,
+//     which is authoritative: it already accounts for rate changes,
+//     discounts and tiers that a static rate table cannot know about, and
+//     it stays correct for models the table has since lost. Rates are the
+//     fallback for steps with no logged cost. Ideal is always computed
+//     from rates — it is a counterfactual, so there is nothing logged to
+//     read it from.
 //
 // Neither OC nor PI nor Claude falls back to some other model's rate for a
 // model missing from its table — OC used to (Kimi K2.6, unconditionally),
 // which is what let eleven different unrelated models get priced at a
 // twelfth model's rate and made the Ideal column fiction. Inventing a price
 // for an unknown model would be indistinguishable from a real number in the
-// output; unpriced steps are excluded from Actual/Ideal for every agent and
-// reported back via the unpriced return value instead.
+// output, so unpriced steps never get a made-up rate and are always reported
+// back via the unpriced return value.
+//
+// They are not, however, always dropped from the totals. When the agent
+// logged a real cost for them (PI, OpenCode), that money still lands in
+// Actual and is mirrored into Ideal — see unpricedModel.LoggedCost. Only
+// steps with no logged cost at all (every Claude step, since Claude's
+// message.cost is tokeneks' own recomputation rather than a billed figure)
+// are excluded outright, because for those there is nothing to count.
 func totalsByAgent(ctx context.Context, days int) ([]agentTotal, []unpricedModel, error) {
-	// claudePrices is computed once (not inside priceFunc) because
-	// claudeGlobalModelPrices rebuilds a map from the memoized overlays on
-	// every call — fine done once per report, wasteful done once per step.
-	claudePrices := claudeGlobalModelPrices()
-
-	type spec struct {
-		store string // agent column value in the store
-		label string // row label in the printed table
-		// priceFunc resolves model's price as of the step's own timestamp
-		// (ms epoch) — a derived opencode/pi rate can now have more than
-		// one effective window (see prices_derive.go's segmentation), so
-		// resolving "the current rate" for every step regardless of when
-		// it ran would price a step from before a rate change at the rate
-		// that came after it. Claude ignores at for now (see prices_check.go
-		// and claude.go's own dated-window mechanism for the parallel path
-		// that already exists there); it's part of the signature only so
-		// all three specs share one shape.
-		priceFunc   func(model string, at int64) (compute.ModelPrices, bool)
-		claudeStyle bool // true => ComputeIdealClaude (PI, Claude); false => ComputeIdeal (OC)
-		// costIsLogged marks agents whose message.cost came from their own
-		// log rather than from tokeneks. Claude Code stopped writing costUSD
-		// (1 of 141 recent session files still has it), so its stored cost is
-		// this program's own ingest-time recomputation — preferring it would
-		// freeze whatever rates were in effect at ingest and make
-		// `prices update` silently a no-op until the next `sync --force`.
-		costIsLogged bool
-	}
-	specs := []spec{
-		{store: "opencode", label: "OC", priceFunc: func(m string, at int64) (compute.ModelPrices, bool) { return resolveAgentPricesAt("opencode", m, at) }, claudeStyle: false, costIsLogged: true},
-		{store: "pi", label: "PI", priceFunc: func(m string, at int64) (compute.ModelPrices, bool) { return resolveAgentPricesAt("pi", m, at) }, claudeStyle: true, costIsLogged: true},
-		{store: "claude", label: "CLAUDE", priceFunc: func(m string, _ int64) (compute.ModelPrices, bool) {
-			p, ok := claudePrices[m]
-			return p, ok && p.Input > 0
-		}, claudeStyle: true, costIsLogged: false},
-	}
+	specsByAgent := buildPricingSpecs()
+	// Fixed order so the printed table's row order doesn't depend on map
+	// iteration order.
+	order := []string{"opencode", "pi", "claude"}
 
 	var rows []agentTotal
 	unpricedByModel := map[string]*unpricedModel{}
 
-	for _, sp := range specs {
-		sessions, err := aggregateSessionsFromStore(ctx, sp.store, days, "")
+	for _, storeAgent := range order {
+		sp := specsByAgent[storeAgent]
+		sessions, err := aggregateSessionsFromStore(ctx, storeAgent, days, "")
 		if err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", sp.label, err)
+			return nil, nil, fmt.Errorf("%s: %w", sp.Label, err)
 		}
 
 		var actual, ideal float64
@@ -341,56 +322,25 @@ func totalsByAgent(ctx context.Context, days int) ([]agentTotal, []unpricedModel
 				continue
 			}
 
-			tokens := make([]compute.StepData, len(sess.Steps))
-			for i, s := range sess.Steps {
-				tokens[i] = s.Data
-			}
-
-			// ComputeIdealClaude's prices argument is unused by the
-			// algorithm itself (see compute.go) — it only shapes the
-			// IdealCC/IdealIn split, which depends on CacheCreation, not on
-			// any rate — so a zero-value table here is fine; real pricing
-			// happens per row below.
-			var idealRows []compute.IdealRow
-			if sp.claudeStyle {
-				idealRows = compute.ComputeIdealClaude(tokens, compute.ModelPrices{})
-			} else {
-				idealRows = compute.ComputeIdeal(tokens)
-			}
-
-			for i, row := range idealRows {
-				step := sess.Steps[i]
-
-				prices, priced := sp.priceFunc(step.Model, step.CreatedAt)
-				if !priced {
-					key := sp.label + "\x00" + step.Model
-					u := unpricedByModel[key]
-					if u == nil {
-						u = &unpricedModel{Agent: sp.label, Model: step.Model}
-						unpricedByModel[key] = u
-					}
-					u.Steps++
-					u.Tokens += row.Input + row.CacheCreation + row.CacheRead + row.Output
-					if sp.costIsLogged {
-						u.LoggedCost += step.LoggedCost
-					}
+			for _, stepPrice := range computeSessionPricing(sess.Steps, sp.ClaudeStyle, sp.CostIsLogged, sp.PriceFunc) {
+				actual += stepPrice.Paid
+				ideal += stepPrice.Ideal
+				if stepPrice.Priced {
 					continue
 				}
-
-				// IdealCC is a synthetic re-derivation with no real 5m/1h
-				// split, so — same convention as compute.Summarize — it's
-				// priced entirely at the 5m rate (CacheCreation1h left at 0).
-				idealStep := compute.StepData{Input: row.IdealIn, CacheCreation: row.IdealCC, CacheRead: row.IdealCR, Output: row.Output}
-				if sp.costIsLogged && step.LoggedCost > 0 {
-					actual += step.LoggedCost
-				} else {
-					actual += compute.PiStepActualCost(step.Data, prices)
+				key := sp.Label + "\x00" + stepPrice.Model
+				u := unpricedByModel[key]
+				if u == nil {
+					u = &unpricedModel{Agent: sp.Label, Model: stepPrice.Model}
+					unpricedByModel[key] = u
 				}
-				ideal += compute.PiStepActualCost(idealStep, prices)
+				u.Steps++
+				u.Tokens += stepPrice.Tokens
+				u.LoggedCost += stepPrice.LoggedCost
 			}
 		}
 
-		rows = append(rows, agentTotal{Label: sp.label, Actual: actual, Ideal: ideal})
+		rows = append(rows, agentTotal{Label: sp.Label, Actual: actual, Ideal: ideal})
 	}
 
 	unpriced := make([]unpricedModel, 0, len(unpricedByModel))
@@ -446,25 +396,45 @@ func printTotal(days int) error {
 	return nil
 }
 
-// printUnpricedModels prints the standard "excluded from totals" warning
-// block for a list of unpriced models, or nothing when there are none.
-// Shared by `total`, `oc list`, and `pi list` so a genuine pricing gap
-// reads identically everywhere it surfaces, rather than each command
-// inventing its own wording for the same situation.
+// printUnpricedModels prints the standard "no price" warning block for a
+// list of unpriced models, or nothing when there are none. Shared by
+// `total`, `oc list`, and `pi list` so a genuine pricing gap reads
+// identically everywhere it surfaces, rather than each command inventing its
+// own wording for the same situation.
+//
+// The two cases are worded apart on purpose. A model with a logged cost is
+// still in the totals (counted at zero overpay), so calling it "excluded"
+// would send someone hunting for money that is in fact accounted for; a
+// model without one really is missing from the numbers above.
 func printUnpricedModels(unpriced []unpricedModel) {
 	if len(unpriced) == 0 {
 		return
 	}
+	var counted, dropped int
+	for _, u := range unpriced {
+		if u.LoggedCost > 0 {
+			counted++
+		} else {
+			dropped++
+		}
+	}
 	fmt.Println()
-	fmt.Printf("warning: %d model(s) have no price and are excluded from the totals above:\n", len(unpriced))
+	fmt.Printf("warning: %d model(s) have no price:\n", len(unpriced))
 	for _, u := range unpriced {
 		// The logged cost is only shown when the agent reported one — a
 		// blank column means "unknown", not "free".
-		logged := "        "
+		logged, note := "        ", "excluded"
 		if u.LoggedCost > 0 {
 			logged = fmt.Sprintf("$%7.2f", u.LoggedCost)
+			note = "counted, no overpay"
 		}
-		fmt.Printf("  %-6s  %-24s  %8s tok  %4d steps  %s logged\n",
-			u.Agent, u.Model, formatTokens(u.Tokens), u.Steps, logged)
+		fmt.Printf("  %-6s  %-24s  %8s tok  %4d steps  %s logged  (%s)\n",
+			u.Agent, u.Model, formatTokens(u.Tokens), u.Steps, logged, note)
+	}
+	if counted > 0 {
+		fmt.Println("  counted: billed cost is in Paid and mirrored into Ideal, so their overpay reads as 0%")
+	}
+	if dropped > 0 {
+		fmt.Println("  excluded: no billed cost logged, so these steps are absent from the totals above")
 	}
 }

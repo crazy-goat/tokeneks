@@ -69,7 +69,10 @@
   .steps-table .gap-value.warn { color: #fbbf24; }
   .steps-table .gap-alert { color: #fb7185; font-weight: 800; margin-right: 6px; }
   .steps-table .cost-value { font-weight: 700; color: #ffffff; }
+  .steps-table .overpay-note { color: #fbbf24; font-size: 0.72rem; margin-top: 2px; }
   .steps-table .tools-count { color: #38bdf8; font-weight: 600; }
+  .unpriced-flag { color: #fbbf24; font-weight: 700; margin-left: 5px; cursor: help; }
+  .meta span.overpay-meta { border-left: 2px solid #fbbf24; }
   .step-details { display: none; background: #162032; }
   .step-details.open { display: table-row; }
   .step-details td { padding: 16px; }
@@ -128,7 +131,8 @@
         <th class="col-num">Cache Read</th>
         <th class="col-num">Cache Write</th>
         <th class="col-tools">Tools</th>
-        <th class="col-cost">Cost</th>
+        <th class="col-cost">Paid</th>
+        <th class="col-cost">Ideal</th>
       </tr>
     </thead>
     <tbody id="steps"></tbody>
@@ -220,6 +224,9 @@ function buildStepRenderItems(steps) {
       : `<span class="gap-value">${gapLabel}</span>`;
     const hasCacheReadDrop = prevCacheRead !== null && s.cacheRead < prevCacheRead;
     const rowClass = `step-row${hasCacheReadDrop ? ' non-monotonic' : ''}`;
+    const stepIdeal = s.ideal || 0;
+    const stepOverpay = Math.max(s.cost - stepIdeal, 0);
+    const overpayNote = stepOverpay > 0.00005 ? `<div class="overpay-note">+$${stepOverpay.toFixed(4)} over</div>` : '';
     const rowHTML = `
       <td class="col-step"><span class="badge-step">${s.step}</span></td>
       <td class="col-model"><span class="model-name">${escHtml(s.model || '–')}</span></td>
@@ -230,10 +237,11 @@ function buildStepRenderItems(steps) {
       <td class="col-num">${s.cacheRead.toLocaleString()}</td>
       <td class="col-num">${s.cacheWrite.toLocaleString()}</td>
       <td class="col-tools"><span class="tools-count">${toolCount}</span></td>
-      <td class="col-cost"><span class="cost-value">$${s.cost.toFixed(4)}</span></td>
+      <td class="col-cost"><span class="cost-value">$${s.cost.toFixed(4)}</span>${overpayNote}</td>
+      <td class="col-cost">$${stepIdeal.toFixed(4)}</td>
     `;
     const detailsHTML = `
-      <td colspan="10">
+      <td colspan="11">
         <div class="step-body">
           ${s.userPrompt ? '<div class="user-block"><div class="label">User prompt</div><div class="user-text">'+escHtml(s.userPrompt)+'</div></div>' : ''}
           ${s.thinking ? '<div class="think-block"><div class="label">Thinking</div><pre>'+escHtml(s.thinking)+'</pre></div>' : ''}
@@ -255,6 +263,7 @@ function buildStepRenderItems(steps) {
       cacheRead: s.cacheRead,
       cacheWrite: s.cacheWrite,
       cost: s.cost,
+      ideal: s.ideal,
       userPrompt: s.userPrompt || '',
       thinking: s.thinking || '',
       response: s.response || '',
@@ -332,13 +341,21 @@ async function load() {
   document.getElementById('title').textContent = `${d.agent} session ${d.id.slice(0,8)}`;
   document.getElementById('subtitle').textContent = d.title || d.project || '';
   const meta = document.getElementById('meta');
+  const overpay = d.overpay || 0;
+  const overpayPct = d.overpayPct || 0;
+  const overpayColor = overpay <= 0.0001 ? '#94a3b8' : overpayPct >= 20 ? '#f87171' : overpayPct >= 5 ? '#fbbf24' : '#e2e8f0';
+  const unpricedNote = d.partiallyUnpriced
+    ? ` <span class="unpriced-flag" title="${(d.unpricedTokens || 0).toLocaleString()} tokens have no resolvable rate — Ideal/Overpay are a lower bound, not a measured figure">⚠</span>`
+    : '';
   meta.innerHTML = `
     <span>Agent: ${d.agent}</span>
     <span>Model: ${d.model || '–'}</span>
     <span>Date: ${d.date}</span>
     <span>Duration: ${d.duration || '–'}</span>
     <span>Steps: ${d.steps.length}</span>
-    <span>Total Cost: $${d.totalCost.toFixed(4)}</span>
+    <span>Paid: $${d.totalCost.toFixed(4)}</span>
+    <span>Ideal: $${(d.ideal || 0).toFixed(4)}</span>
+    <span class="overpay-meta">Overpay: <span style="color:${overpayColor};font-weight:700">$${overpay.toFixed(4)} (${overpayPct.toFixed(1)}%)</span>${unpricedNote}</span>
     ${(d.totalCostInclChildren && d.totalCostInclChildren > d.totalCost) ? `<span>Total incl. subagents: $${d.totalCostInclChildren.toFixed(4)}</span>` : ''}
   `;
 

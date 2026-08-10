@@ -38,13 +38,19 @@ type StepInfo struct {
 	CacheWrite int    `json:"cacheWrite"`
 	// CacheWrite1h is the 1-hour-TTL slice of CacheWrite; Claude-only, needed
 	// to price cache writes at the right rate instead of always the 5m one.
-	CacheWrite1h int            `json:"cacheWrite1h"`
-	Cost         float64        `json:"cost"`
-	Thinking     string         `json:"thinking,omitempty"`
-	Response     string         `json:"response,omitempty"`
-	UserPrompt   string         `json:"userPrompt,omitempty"`
-	StopReason   string         `json:"stopReason,omitempty"`
-	ToolCalls    []ToolCallInfo `json:"toolCalls,omitempty"`
+	CacheWrite1h int     `json:"cacheWrite1h"`
+	Cost         float64 `json:"cost"`
+	// Ideal is this step's own counterfactual cost, priced at the same
+	// per-step rate as Cost — see computeSessionPricing in web_store.go.
+	// Not omitempty: a step can legitimately have Ideal == 0 (its first
+	// message in the session, before any context exists to reuse), and
+	// that must render as $0.0000, not vanish from the JSON.
+	Ideal      float64        `json:"ideal"`
+	Thinking   string         `json:"thinking,omitempty"`
+	Response   string         `json:"response,omitempty"`
+	UserPrompt string         `json:"userPrompt,omitempty"`
+	StopReason string         `json:"stopReason,omitempty"`
+	ToolCalls  []ToolCallInfo `json:"toolCalls,omitempty"`
 }
 
 type ToolDurationStat struct {
@@ -82,17 +88,28 @@ type SessionLink struct {
 }
 
 type SessionDetail struct {
-	Agent     string        `json:"agent"`
-	ID        string        `json:"id"`
-	Title     string        `json:"title"`
-	Project   string        `json:"project"`
-	Model     string        `json:"model"`
-	Date      string        `json:"date"`
-	Duration  string        `json:"duration"`
-	Steps     []StepInfo    `json:"steps"`
-	TotalCost float64       `json:"totalCost"`
-	Parent    *SessionLink  `json:"parent,omitempty"`
-	Children  []SessionLink `json:"children,omitempty"`
+	Agent     string     `json:"agent"`
+	ID        string     `json:"id"`
+	Title     string     `json:"title"`
+	Project   string     `json:"project"`
+	Model     string     `json:"model"`
+	Date      string     `json:"date"`
+	Duration  string     `json:"duration"`
+	Steps     []StepInfo `json:"steps"`
+	TotalCost float64    `json:"totalCost"`
+	// Ideal/Overpay/OverpayPct are this session's own totals — see
+	// WebSession for what they mean and computeSessionPricing (web_store.go)
+	// for how they're computed. Only getSessionDetailFromStore (the path
+	// the web dashboard actually uses) fills these in; the legacy
+	// direct-parse *SessionDetail builders below (used only by the
+	// ingester, not the web UI) leave them at zero.
+	Ideal             float64       `json:"ideal"`
+	Overpay           float64       `json:"overpay"`
+	OverpayPct        float64       `json:"overpayPct"`
+	UnpricedTokens    int           `json:"unpricedTokens,omitempty"`
+	PartiallyUnpriced bool          `json:"partiallyUnpriced,omitempty"`
+	Parent            *SessionLink  `json:"parent,omitempty"`
+	Children          []SessionLink `json:"children,omitempty"`
 	// TotalCostInclChildren is the cost of this session's own steps plus
 	// the cost of all descendant subsessions (recursively). Not part of
 	// TotalCost so per-session numbers stay comparable across the UI.

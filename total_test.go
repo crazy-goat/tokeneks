@@ -246,6 +246,44 @@ func TestTotalsByAgent_UnpricedModelExcludedAndReported(t *testing.T) {
 	}
 }
 
+// A missing rate must not delete money the provider actually billed. When the
+// agent logged a cost, that cost belongs in Paid even though no rate exists
+// to build an Ideal from; Ideal mirrors it so the step reads as zero overpay
+// instead of vanishing from the report. Dropping it made the Paid column
+// disagree with OpenCode's own bill ($179.20 against a logged $187.04).
+func TestTotalsByAgent_UnpricedButLoggedCostStillCounts(t *testing.T) {
+	st := withTempStore(t)
+
+	const logged = 3.25
+	ingestTotalTestSession(t, st, "opencode", "s1", []testStep{
+		loggedStep("model-with-no-price-at-all", 5000, 1000, 500, logged),
+	})
+
+	rows, unpriced, err := totalsByAgent(context.Background(), 30)
+	if err != nil {
+		t.Fatalf("totalsByAgent: %v", err)
+	}
+
+	oc := agentTotalRow(t, rows, "OC")
+	if oc.Actual != logged {
+		t.Errorf("OC actual = %v, want %v (the logged cost, despite the missing rate)", oc.Actual, logged)
+	}
+	// Equal, not zero: an unpriced step must not manufacture overpay it has
+	// no rate to justify, nor savings.
+	if oc.Ideal != logged {
+		t.Errorf("OC ideal = %v, want %v (mirrored from the logged cost)", oc.Ideal, logged)
+	}
+
+	// Still reported — counted is not the same as priced, and the warning is
+	// the only place the pricing gap is visible.
+	if len(unpriced) != 1 {
+		t.Fatalf("unpriced = %+v, want exactly 1 entry", unpriced)
+	}
+	if u := unpriced[0]; u.LoggedCost != logged {
+		t.Errorf("unpriced LoggedCost = %v, want %v", u.LoggedCost, logged)
+	}
+}
+
 // Paid must come from what PI logged, not from a recomputation. PI records
 // the provider's own billed figure per message, which already reflects rate
 // changes and discounts the local table cannot know about.
@@ -365,8 +403,10 @@ func TestTotalsByAgent_UnpricedModelReportsLoggedCost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("totalsByAgent: %v", err)
 	}
-	if agentTotalRow(t, rows, "PI").Actual != 0 {
-		t.Error("unpriced steps must stay out of the totals even when their cost is known")
+	// Summed across both steps, and still surfaced in the warning: being
+	// counted is not the same as being priced.
+	if got := agentTotalRow(t, rows, "PI").Actual; got != 2.0 {
+		t.Errorf("PI actual = %v, want 2.0 (both logged costs, despite the missing rate)", got)
 	}
 	if len(unpriced) != 1 {
 		t.Fatalf("unpriced = %+v, want 1 entry", unpriced)

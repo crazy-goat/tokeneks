@@ -253,6 +253,132 @@ func TestMarkdownDownloadFilename_SanitizesPath(t *testing.T) {
 	}
 }
 
+// The web dashboard and `total` must never disagree about a session's
+// Paid/Ideal — that agreement is the whole point of sharing
+// computeSessionPricing between them (see totalsByAgent's doc comment in
+// main.go). This ingests the same fixture totalsByAgent's own tests use
+// (a Claude session that switches models mid-run, so the ideal-cache
+// carry-forward actually matters) and checks the two surfaces agree to
+// within floating-point noise from summation order.
+func TestGatherWebSessionsFromStore_AgreesWithTotalsByAgent(t *testing.T) {
+	st := withTempStore(t)
+
+	ingestTotalTestSession(t, st, "claude", "s1", []testStep{
+		{Model: "claude-sonnet-5", Step: compute.StepData{Input: 20000, Output: 1000}},
+		{Model: "claude-opus-5", Step: compute.StepData{Input: 20000, Output: 1000}},
+	})
+	ingestTotalTestSession(t, st, "opencode", "s2", []testStep{
+		loggedStep("Kimi K2.6", 5000, 1000, 500, 1.23),
+	})
+	ingestTotalTestSession(t, st, "pi", "s3", []testStep{
+		loggedStep("Kimi K2.6", 3000, 500, 200, 0.42),
+	})
+
+	ctx := context.Background()
+	webSessions, err := gatherWebSessionsFromStore(ctx, 30)
+	if err != nil {
+		t.Fatalf("gatherWebSessionsFromStore: %v", err)
+	}
+	rows, _, err := totalsByAgent(ctx, 30)
+	if err != nil {
+		t.Fatalf("totalsByAgent: %v", err)
+	}
+
+	webAgentLabel := map[string]string{"Claude": "CLAUDE", "OpenCode": "OC", "PI": "PI"}
+	type totals struct{ paid, ideal float64 }
+	gotByAgent := map[string]totals{}
+	for _, ws := range webSessions {
+		label := webAgentLabel[ws.Agent]
+		e := gotByAgent[label]
+		e.paid += ws.TotalCost
+		e.ideal += ws.Ideal
+		gotByAgent[label] = e
+	}
+
+	const tol = 1e-9
+	for _, row := range rows {
+		got := gotByAgent[row.Label]
+		if !approxEqual(got.paid, row.Actual, tol) {
+			t.Errorf("%s: web Paid = %v, totalsByAgent Actual = %v", row.Label, got.paid, row.Actual)
+		}
+		if !approxEqual(got.ideal, row.Ideal, tol) {
+			t.Errorf("%s: web Ideal = %v, totalsByAgent Ideal = %v", row.Label, got.ideal, row.Ideal)
+		}
+	}
+}
+
+// Same agreement check as above, but for the session detail view (the other
+// caller of computeSessionPricing) instead of the session list.
+func TestGetSessionDetailFromStore_AgreesWithTotalsByAgent(t *testing.T) {
+	st := withTempStore(t)
+
+	ingestTotalTestSession(t, st, "claude", "s1", []testStep{
+		{Model: "claude-sonnet-5", Step: compute.StepData{Input: 20000, Output: 1000}},
+		{Model: "claude-opus-5", Step: compute.StepData{Input: 20000, Output: 1000}},
+	})
+
+	ctx := context.Background()
+	detail, err := getSessionDetailFromStore(ctx, "claude", "s1")
+	if err != nil {
+		t.Fatalf("getSessionDetailFromStore: %v", err)
+	}
+	rows, _, err := totalsByAgent(ctx, 30)
+	if err != nil {
+		t.Fatalf("totalsByAgent: %v", err)
+	}
+	claude := agentTotalRow(t, rows, "CLAUDE")
+
+	const tol = 1e-9
+	if !approxEqual(detail.TotalCost, claude.Actual, tol) {
+		t.Errorf("detail.TotalCost = %v, totalsByAgent Actual = %v", detail.TotalCost, claude.Actual)
+	}
+	if !approxEqual(detail.Ideal, claude.Ideal, tol) {
+		t.Errorf("detail.Ideal = %v, totalsByAgent Ideal = %v", detail.Ideal, claude.Ideal)
+	}
+	wantOverpay := claude.Actual - claude.Ideal
+	if wantOverpay < 0 {
+		wantOverpay = 0
+	}
+	if !approxEqual(detail.Overpay, wantOverpay, tol) {
+		t.Errorf("detail.Overpay = %v, want %v", detail.Overpay, wantOverpay)
+	}
+}
+
+// A session with a step whose model has no resolvable rate and no logged
+// cost must not silently read as "0% overpay" — its overpay is partially
+// unknown, not zero, and the web layer must say so rather than pricing the
+// unpriced tokens at some invented rate (or worse, dropping them without a
+// trace).
+func TestGatherWebSessionsFromStore_FlagsPartiallyUnpriced(t *testing.T) {
+	st := withTempStore(t)
+
+	ingestTotalTestSession(t, st, "opencode", "s1", []testStep{
+		loggedStep("Kimi K2.6", 5000, 1000, 500, 1.0),
+		step("fake-model-no-price-xyz", 2000, 0, 100), // no rate, no logged cost
+	})
+
+	sessions, err := gatherWebSessionsFromStore(context.Background(), 30)
+	if err != nil {
+		t.Fatalf("gatherWebSessionsFromStore: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	ws := sessions[0]
+	if !ws.PartiallyUnpriced {
+		t.Error("expected PartiallyUnpriced = true")
+	}
+	if ws.UnpricedTokens == 0 {
+		t.Error("expected UnpricedTokens > 0")
+	}
+	// Only the priced, logged step contributes — the unpriced step is
+	// excluded outright since it has no logged cost to fall back on (see
+	// unpricedModel in main.go).
+	if ws.TotalCost != 1.0 {
+		t.Errorf("TotalCost = %v, want 1.0 (only the priced/logged step)", ws.TotalCost)
+	}
+}
+
 func TestOCSessions_UsesStoredStepFinishCost(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

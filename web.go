@@ -43,12 +43,27 @@ type WebSession struct {
 	TotalCacheRead  int             `json:"totalCacheRead"`
 	TotalCacheWrite int             `json:"totalCacheWrite"`
 	TotalCost       float64         `json:"totalCost"`
-	Messages        int             `json:"messages"`
-	ToolCalls       int             `json:"toolCalls"`
-	PromptInput     int             `json:"promptInput"`
-	ParentID        string          `json:"parentId,omitempty"`
-	ChildCount      int             `json:"childCount,omitempty"`
-	IsSubsession    bool            `json:"isSubsession,omitempty"`
+	// Ideal is the counterfactual cost with optimal prompt-cache reuse,
+	// computed by the same engine totalsByAgent uses (computeSessionPricing
+	// in web_store.go) so this number agrees with `total`'s. Overpay is
+	// max(TotalCost-Ideal, 0) and OverpayPct is Overpay/Ideal*100.
+	Ideal      float64 `json:"ideal"`
+	Overpay    float64 `json:"overpay"`
+	OverpayPct float64 `json:"overpayPct"`
+	// UnpricedTokens/PartiallyUnpriced flag a session containing steps
+	// whose model had no resolvable rate — Overpay for those tokens is
+	// either assumed zero (when the agent logged a real cost for them) or
+	// entirely absent (when it didn't), never a measured figure, so a
+	// session with these set should not be read as "0% overpay" without
+	// the caveat.
+	UnpricedTokens    int    `json:"unpricedTokens,omitempty"`
+	PartiallyUnpriced bool   `json:"partiallyUnpriced,omitempty"`
+	Messages          int    `json:"messages"`
+	ToolCalls         int    `json:"toolCalls"`
+	PromptInput       int    `json:"promptInput"`
+	ParentID          string `json:"parentId,omitempty"`
+	ChildCount        int    `json:"childCount,omitempty"`
+	IsSubsession      bool   `json:"isSubsession,omitempty"`
 }
 
 func piStepWebCost(step piSessionStep) float64 {
@@ -322,4 +337,3 @@ func handleAPISessionsStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-
