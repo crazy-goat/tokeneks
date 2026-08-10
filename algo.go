@@ -7,14 +7,13 @@ import (
 	"tokeneks/compute"
 )
 
-// Prices per 1M tokens
-const (
-	PriceInput     = 0.95
-	PriceCacheRead = 0.16
-	PriceOutput    = 4.00
-)
-
-// OpenCode model prices
+// ocModelPrices is OpenCode's last-resort price table — see
+// resolveAgentPricesSource in prices_resolve.go, which tries derived rates
+// and models.dev's own "opencode" provider catalog first. This table only
+// prices a model actually named one of the keys below; it must never be
+// used as a blanket fallback for models it doesn't list. That fallback used
+// to exist (every unpriced model silently priced at Kimi K2.6's rate) and is
+// exactly what made OC's Ideal cost fiction — see prices_resolve.go.
 var ocModelPrices = map[string]compute.ModelPrices{
 	"Kimi K2.6": {
 		Input:     0.95,
@@ -47,9 +46,13 @@ func printDetailRows(rows []compute.IdealRow, prices compute.ModelPrices, showCC
 			"SUM", s.TotalCR, s.TotalCC, s.TotalIn, s.TotalOut,
 			s.TotalIdealCR, s.TotalIdealCC, s.TotalOut,
 			s.TotalWaste)
+		// c.write $ splits 5m/1h at their own rates so this line adds up to
+		// the same actual total as compute.PiStepActualCost.
+		cacheWriteCost := float64(s.TotalCC-s.TotalCC1h)*prices.CacheCreation/compute.TokensPerMillion +
+			float64(s.TotalCC1h)*prices.CacheCreation1h/compute.TokensPerMillion
 		fmt.Printf("%4s  %7.2f  %7.2f  %7.2f  %6.2f  │  %8.2f  %8.2f  %6.2f  │  %7.2f\n",
 			"$",
-			float64(s.TotalCR)*prices.CacheRead/compute.TokensPerMillion, float64(s.TotalCC)*prices.CacheCreation/compute.TokensPerMillion,
+			float64(s.TotalCR)*prices.CacheRead/compute.TokensPerMillion, cacheWriteCost,
 			float64(s.TotalIn)*prices.Input/compute.TokensPerMillion, float64(s.TotalOut)*prices.Output/compute.TokensPerMillion,
 			float64(s.TotalIdealCR)*prices.CacheRead/compute.TokensPerMillion, float64(s.TotalIdealCC)*prices.CacheCreation/compute.TokensPerMillion,
 			float64(s.TotalOut)*prices.Output/compute.TokensPerMillion,

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -298,18 +299,19 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 			pendingUserPrompt = m.Content
 		case store.RoleAssistant:
 			s := StepInfo{
-				Step:       len(steps) + 1,
-				Timestamp:  time.UnixMilli(m.CreatedAt).UTC().Format(time.RFC3339),
-				Model:      m.Model,
-				Input:      m.InputTokens,
-				Output:     m.OutputTokens,
-				CacheRead:  m.CacheRead,
-				CacheWrite: m.CacheWrite,
-				Cost:       m.Cost,
-				Thinking:   m.Thinking,
-				Response:   m.Response,
-				UserPrompt: pendingUserPrompt,
-				StopReason: m.StopReason,
+				Step:         len(steps) + 1,
+				Timestamp:    time.UnixMilli(m.CreatedAt).UTC().Format(time.RFC3339),
+				Model:        m.Model,
+				Input:        m.InputTokens,
+				Output:       m.OutputTokens,
+				CacheRead:    m.CacheRead,
+				CacheWrite:   m.CacheWrite,
+				CacheWrite1h: m.CacheWrite1h,
+				Cost:         m.Cost,
+				Thinking:     m.Thinking,
+				Response:     m.Response,
+				UserPrompt:   pendingUserPrompt,
+				StopReason:   m.StopReason,
 			}
 			pendingUserPrompt = ""
 			tcs, err := st.GetToolCalls(ctx, m.ID)
@@ -351,7 +353,11 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 		SELECT s.session_id, COALESCE(s.project, ''),
 		       COALESCE((SELECT m.model FROM message m
 		                 WHERE m.agent = s.agent AND m.session_id = s.session_id
-		                 AND m.role = 'assistant' ORDER BY m.msg_index ASC LIMIT 1), '')
+		                 AND m.role = 'assistant' ORDER BY m.msg_index ASC LIMIT 1), ''),
+		       s.created_at,
+		       (SELECT COUNT(*) FROM message m
+		        WHERE m.agent = s.agent AND m.session_id = s.session_id
+		        AND m.role = 'assistant')
 		FROM session s
 		WHERE s.agent = ? AND s.parent_id = ?
 		ORDER BY s.created_at ASC
@@ -360,12 +366,15 @@ func getSessionDetailFromStore(ctx context.Context, agent, sessionID string) (*S
 		defer childRows.Close()
 		for childRows.Next() {
 			var child SessionLink
+			var childCreated int64
 			child.Agent = agentDisplayName(agent)
-			if err := childRows.Scan(&child.ID, &child.Title, &child.Model); err != nil {
+			// Steps is the assistant-message count so it matches the step
+			// list on the subsession's own detail page.
+			if err := childRows.Scan(&child.ID, &child.Title, &child.Model, &childCreated, &child.Steps); err != nil {
 				continue
 			}
+			child.Date = time.UnixMilli(childCreated).UTC().Format("2006-01-02 15:04")
 			stats, _ := st.SessionStats(ctx, agent, child.ID)
-			child.Steps = stats.MessageCount
 			child.TotalCost = stats.TotalCost
 			child.TotalInput = stats.InputTokens
 			child.TotalOutput = stats.OutputTokens
@@ -476,7 +485,32 @@ type CLISession struct {
 	TokensOut    int
 	CacheRead    int
 	CacheWrite   int
-	Steps        []compute.StepData // per-step tokens for ideal-cost compute
+	Steps        []sessionStep
+}
+
+// sessionStep is one assistant message: its token usage, the model that
+// served it, and whatever cost the source logged for it.
+//
+// Model and LoggedCost sit here rather than in compute.StepData, which stays
+// provider-agnostic — the compute package prices tokens and knows nothing
+// about model naming or about agents that report their own totals.
+type sessionStep struct {
+	Model string
+	// LoggedCost is the cost the agent's own log reported for this message,
+	// or 0 when it reported none. Only PI and OpenCode log a real
+	// provider-billed figure; for Claude this is tokeneks' own ingest-time
+	// recomputation, so callers must not treat it as ground truth without
+	// checking which agent it came from.
+	LoggedCost float64
+	Data       compute.StepData
+	// CreatedAt is this message's own timestamp (ms epoch), needed to
+	// resolve a derived opencode/pi rate at the window that was actually in
+	// effect when the message ran — a derived model can have more than one
+	// effective window now that prices derive fits rate changes as
+	// separate time segments (see prices_derive.go). Resolving "the
+	// current rate" for every step regardless of when it ran would price a
+	// step from before a rate change at the rate that came after it.
+	CreatedAt int64
 }
 
 // aggregateSessionsFromStore returns CLI-ready session summaries for one agent,
@@ -538,9 +572,16 @@ func aggregateSessionsFromStore(ctx context.Context, agent string, days int, dat
 		}
 		s.Agent = agentDisplayName(agent)
 
-		// fetch step data for ideal-cost calculation
+		// One row per assistant message, in the order they happened. The
+		// model is needed because sessions routinely switch models mid-run,
+		// so pricing a whole session at its first message's rate is wrong;
+		// the cost is needed because PI and OpenCode log what the provider
+		// actually billed, which beats any recomputation from a rate table;
+		// created_at is needed to resolve a derived rate at the window that
+		// was actually in effect for that message (see sessionStep.CreatedAt).
 		stepRows, err := st.DB().QueryContext(ctx, `
-			SELECT input_tokens, cache_read, cache_write, output_tokens
+			SELECT input_tokens, cache_read, cache_write, cache_write_1h, output_tokens,
+			       COALESCE(model, ''), cost, created_at
 			FROM message WHERE agent = ? AND session_id = ? AND role = 'assistant'
 			ORDER BY msg_index ASC
 		`, agent, s.ID)
@@ -548,12 +589,14 @@ func aggregateSessionsFromStore(ctx context.Context, agent string, days int, dat
 			return nil, err
 		}
 		for stepRows.Next() {
-			var in, cr, cw, o int
-			if err := stepRows.Scan(&in, &cr, &cw, &o); err != nil {
+			var ss sessionStep
+			var in, cr, cw, cw1h, o int
+			if err := stepRows.Scan(&in, &cr, &cw, &cw1h, &o, &ss.Model, &ss.LoggedCost, &ss.CreatedAt); err != nil {
 				stepRows.Close()
 				return nil, err
 			}
-			s.Steps = append(s.Steps, compute.StepData{Input: in, CacheRead: cr, CacheCreation: cw, Output: o})
+			ss.Data = compute.StepData{Input: in, CacheRead: cr, CacheCreation: cw, CacheCreation1h: cw1h, Output: o}
+			s.Steps = append(s.Steps, ss)
 		}
 		stepRows.Close()
 		out = append(out, s)
@@ -561,10 +604,17 @@ func aggregateSessionsFromStore(ctx context.Context, agent string, days int, dat
 	return out, rows.Err()
 }
 
-// ensureStoreReady makes sure the store has data for the given agent.
-// If the store is empty for that agent, a one-shot sync is performed.
-// Pass empty string to sync all agents.
-func ensureStoreReady(agent string) error {
+// ensureStoreReady opens the store and brings it up to date before a read.
+//
+// The sync is incremental: only sessions whose source changed since the
+// last run are re-parsed, so this costs about a second for a few thousand
+// already-ingested sessions. It used to sync only when the store was
+// completely empty, which meant every CLI read after the first one showed
+// whatever the last `sync`/`web` run happened to leave behind.
+//
+// The first run on an empty store has to parse every session, so it says
+// so rather than looking hung.
+func ensureStoreReady() error {
 	st := getTokeneksStore()
 	if st == nil {
 		var err error
@@ -574,16 +624,9 @@ func ensureStoreReady(agent string) error {
 		}
 		setTokeneksStore(st)
 	}
-	if agent != "" {
-		n, _ := st.CountSessions(context.Background(), agent)
-		if n > 0 {
-			return nil
-		}
-	} else {
-		n, _ := st.CountSessions(context.Background(), "")
-		if n > 0 {
-			return nil
-		}
+	ctx := context.Background()
+	if n, err := st.CountSessions(ctx, ""); err == nil && n == 0 {
+		fmt.Fprintln(os.Stderr, "building the session store for the first time, this takes a while...")
 	}
 	sources, parsers := buildAgentIO()
 	ing := &ingest.Ingestor{
@@ -592,7 +635,7 @@ func ensureStoreReady(agent string) error {
 		SourceFor: sources,
 		ParserFor: parsers,
 	}
-	_, err := ing.Sync(context.Background())
+	_, err := ing.Sync(ctx)
 	return err
 }
 

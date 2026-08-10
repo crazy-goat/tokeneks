@@ -35,6 +35,7 @@ type Message struct {
 	OutputTokens int
 	CacheRead    int
 	CacheWrite   int
+	CacheWrite1h int // 1-hour-TTL slice of CacheWrite; Claude-only, 0 elsewhere
 	Cost         float64
 	StopReason   string
 	Thinking     string

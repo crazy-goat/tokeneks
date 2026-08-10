@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS message (
   output_tokens INTEGER NOT NULL DEFAULT 0,
   cache_read    INTEGER NOT NULL DEFAULT 0,
   cache_write   INTEGER NOT NULL DEFAULT 0,
+  cache_write_1h INTEGER NOT NULL DEFAULT 0,
   cost          REAL    NOT NULL DEFAULT 0,
   stop_reason   TEXT,
   thinking      TEXT,
@@ -64,6 +65,32 @@ CREATE TABLE IF NOT EXISTS tool_call (
 );
 CREATE INDEX IF NOT EXISTS idx_tool_message ON tool_call(message_id);
 CREATE INDEX IF NOT EXISTS idx_tool_name    ON tool_call(name);
+
+CREATE TABLE IF NOT EXISTS model_price (
+  provider       TEXT    NOT NULL,
+  model          TEXT    NOT NULL,
+  name           TEXT,
+  input          REAL    NOT NULL DEFAULT 0,
+  output         REAL    NOT NULL DEFAULT 0,
+  cache_read     REAL    NOT NULL DEFAULT 0,
+  cache_write    REAL    NOT NULL DEFAULT 0,
+  cache_write_1h REAL    NOT NULL DEFAULT 0,
+  source         TEXT    NOT NULL,
+  updated_at     INTEGER NOT NULL,
+  -- effective_from/effective_to give a row a validity window in ms epoch,
+  -- so the same (provider, model) can carry more than one rate over time
+  -- (see prices_derive.go's time-segmented derivation). 0 means unbounded
+  -- on that side: effective_from=0 is "since forever", effective_to=0 is
+  -- "still in effect" -- the same open-ended convention claude.go's
+  -- claudePriceWindow already uses for Anthropic's dated price changes.
+  -- effective_from is part of the primary key (not effective_to) because
+  -- windows for one (provider, model) are non-overlapping by construction,
+  -- so its start alone already identifies the row.
+  effective_from INTEGER NOT NULL DEFAULT 0,
+  effective_to   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (provider, model, effective_from)
+);
+CREATE INDEX IF NOT EXISTS idx_model_price_model ON model_price(model);
 `
 
 // Store wraps a sqlite database with the tokeneks schema.
@@ -103,7 +130,89 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
+
+	var hasCacheWrite1h int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('message') WHERE name = 'cache_write_1h'`,
+	).Scan(&hasCacheWrite1h); err != nil {
+		return err
+	}
+	if hasCacheWrite1h == 0 {
+		// Defaults to 0 for every existing row, which is exactly the pre-fix
+		// behavior (all cache writes priced at the 5m rate) — a `sync --force`
+		// is needed to backfill real values from the source JSONL.
+		if _, err := db.Exec(
+			`ALTER TABLE message ADD COLUMN cache_write_1h INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return err
+		}
+	}
+
+	var hasEffectiveFrom int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('model_price') WHERE name = 'effective_from'`,
+	).Scan(&hasEffectiveFrom); err != nil {
+		return err
+	}
+	if hasEffectiveFrom == 0 {
+		if err := migrateModelPriceEffectiveWindow(db); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// migrateModelPriceEffectiveWindow adds effective_from/effective_to to
+// model_price and extends its primary key to include effective_from. A
+// plain ALTER TABLE ADD COLUMN (the pattern used elsewhere in migrate)
+// can't do this: sqlite has no "add a column to the primary key", so the
+// table is rebuilt under a transaction instead — rename it aside, recreate
+// it with the new shape, copy every row across, drop the old one.
+//
+// Every pre-existing row (models.dev syncs, and any derived row from
+// before time-segmented derivation existed) becomes a fully open window
+// (effective_from=0, effective_to=0): that is exactly the one rate it
+// already applied at every timestamp, so running this migration changes
+// no report's numbers by itself.
+func migrateModelPriceEffectiveWindow(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmts := []string{
+		`ALTER TABLE model_price RENAME TO model_price_old`,
+		`CREATE TABLE model_price (
+			provider       TEXT    NOT NULL,
+			model          TEXT    NOT NULL,
+			name           TEXT,
+			input          REAL    NOT NULL DEFAULT 0,
+			output         REAL    NOT NULL DEFAULT 0,
+			cache_read     REAL    NOT NULL DEFAULT 0,
+			cache_write    REAL    NOT NULL DEFAULT 0,
+			cache_write_1h REAL    NOT NULL DEFAULT 0,
+			source         TEXT    NOT NULL,
+			updated_at     INTEGER NOT NULL,
+			effective_from INTEGER NOT NULL DEFAULT 0,
+			effective_to   INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (provider, model, effective_from)
+		)`,
+		`INSERT INTO model_price
+		   (provider, model, name, input, output, cache_read, cache_write, cache_write_1h,
+		    source, updated_at, effective_from, effective_to)
+		 SELECT provider, model, name, input, output, cache_read, cache_write, cache_write_1h,
+		        source, updated_at, 0, 0
+		 FROM model_price_old`,
+		`DROP TABLE model_price_old`,
+		`CREATE INDEX IF NOT EXISTS idx_model_price_model ON model_price(model)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("migrateModelPriceEffectiveWindow: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // Close releases the underlying database handle.

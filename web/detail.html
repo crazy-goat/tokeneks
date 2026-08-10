@@ -37,31 +37,11 @@
   .children-table tr:last-child td { border-bottom: none; }
   .children-table .session-link { color: #e2e8f0; text-decoration: none; }
   .children-table .session-link:hover { text-decoration: underline; }
-  .stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
-  .stats span { background: #162032; padding: 5px 10px; border-radius: 6px; font-size: 0.78rem; }
-  .stats .label { color: #94a3b8; }
-  .stats .val { color: #e2e8f0; font-weight: 600; margin-left: 4px; }
-  .stats .val.good { color: #22c55e; }
-  .stats .val.warn { color: #fbbf24; }
-  .stats .val.bad { color: #fb7185; }
-  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 24px; }
-  .stats-card { background: #1e293b; border-radius: 8px; padding: 16px; border: 1px solid #334155; width: 100%; }
-  .stats-card h3 { font-size: 0.85rem; color: #94a3b8; margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 0.05em; }
-  .stats-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-  .stats-table th { text-align: left; font-size: 0.72rem; color: #94a3b8; padding: 6px 8px; border-bottom: 1px solid #334155; text-transform: uppercase; letter-spacing: 0.05em; }
-  .stats-table th:last-child, .stats-table td:last-child { text-align: right; }
-  .stats-table td { padding: 8px; font-size: 0.82rem; color: #e2e8f0; border-bottom: 1px solid #1e293b; }
-  .stats-table tr:last-child td { border-bottom: none; }
-  .stats-table .model-name { font-weight: 600; }
-  .stats-table .total-name { font-weight: 600; color: #e2e8f0; }
-  .stats-table .val { font-weight: 600; }
-  .stats-table .val.good { color: #22c55e; }
-  .stats-table .val.warn { color: #fbbf24; }
-  .stats-table .val.bad { color: #fb7185; }
-  .stats-table .row-label { color: #94a3b8; font-weight: 600; white-space: nowrap; }
-  .stats-table .section-row td { padding-top: 14px; color: #94a3b8; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; }
-  .stats-table .section-row:first-child td { padding-top: 8px; }
-  .stats-table .wide-cell { font-size: 0.75rem; white-space: pre-line; }
+  .children-table tr.main-session td { font-weight: 700; color: #f8fafc; }
+  .children-table tr.sub-session td:first-child { padding-left: 26px; }
+  .children-table .session-indent { color: #475569; margin-right: 6px; }
+  .children-table .session-date { color: #94a3b8; white-space: nowrap; }
+  .children-table tfoot td { border-top: 1px solid #334155; font-weight: 700; }
   .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 20px; margin-bottom: 24px; }
   .chart-container { background: #1e293b; border-radius: 8px; padding: 16px; }
   .chart-container h2 { font-size: 1rem; margin-bottom: 12px; }
@@ -126,7 +106,6 @@
 <div class="subtitle" id="subtitle"></div>
 <div class="meta" id="meta"></div>
 <div class="relations" id="relations"></div>
-<div class="stats" id="stats"></div>
 <div style="display:flex;justify-content:flex-end;align-items:center;margin:-4px 0 12px;">
   <span id="autoRefreshStatus" style="font-size:0.78rem;color:#94a3b8;">Auto-refresh: every 10s</span>
 </div>
@@ -378,159 +357,96 @@ async function load() {
       </div>
     `);
   }
-  if (d.children && d.children.length) {
-    relationBlocks.push(`
-      <div class="relation-card">
-        <div class="label">Subsessions (${d.children.length})</div>
-        <table class="children-table">
-          <thead>
-            <tr>
-              <th>Session</th>
-              <th>Model</th>
-              <th class="num">Input</th>
-              <th class="num">Output</th>
-              <th class="num">Cache R</th>
-              <th class="num">Cache W</th>
-              <th class="num">Cache Hit</th>
-              <th class="num">Steps</th>
-              <th class="num">Cost</th>
-              <th class="num">$/1M</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${d.children.map(child => `
-              <tr>
-                <td>
-                  <a class="session-link" href="/detail?agent=${encodeURIComponent(child.agent)}&id=${encodeURIComponent(child.id)}">${escHtml(child.title || child.project || child.id)}</a>
-                </td>
-                <td>${escHtml(child.model || '–')}</td>
-                <td class="num">${(child.totalInput || 0).toLocaleString()}</td>
-                <td class="num">${(child.totalOutput || 0).toLocaleString()}</td>
-                <td class="num">${(child.totalCacheRead || 0).toLocaleString()}</td>
-                <td class="num">${(child.totalCacheWrite || 0).toLocaleString()}</td>
-                <td class="num">${Number.isFinite(child.cacheHitRate) ? child.cacheHitRate.toFixed(1) + '%' : '–'}</td>
-                <td class="num">${(child.steps || 0).toLocaleString()}</td>
-                <td class="num">$${(child.totalCost || 0).toFixed(4)}</td>
-                <td class="num">$${(((child.totalCost || 0) / Math.max((child.totalInput || 0) + (child.totalOutput || 0) + (child.totalCacheRead || 0) + (child.totalCacheWrite || 0), 1)) * 1e6).toFixed(2)}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-          <tfoot>
-            <tr>
-              <td class="row-label" colspan="8">Subtotal (${d.children.length} subsessions, direct)</td>
-              <td class="num">$${d.children.reduce((a, c) => a + (c.totalCost || 0), 0).toFixed(4)}</td>
-              <td class="num"></td>
-            </tr>
-          </tfoot>
-        </table>
-      </div>
-    `);
-  }
-  relationsEl.innerHTML = relationBlocks.join('');
-
-  // stats - total and per-model
-  function cacheHitCls(rate) { return rate >= 50 ? 'good' : rate >= 20 ? 'warn' : ''; }
-  function formatMs(ms) { return ms >= 1000 ? (ms/1000).toFixed(1)+'s' : ms+'ms'; }
-  
-  // Build stop reasons string
-  const stopStr = d.stopReasons ? Object.entries(d.stopReasons).map(([k,v]) => k+':'+v).join('\n') : '–';
-  
-  // Tool durations string
-  const toolDurStr = d.toolDurations && d.toolDurations.length 
-    ? d.toolDurations.map(td => td.name+' '+formatMs(td.avgMs)).join('\n')
-    : '–';
-  const totalMeta = { tools: d.totalToolCalls, errors: d.toolErrors, stop: stopStr, toolDurations: toolDurStr };
-  const modelMetaByName = Object.fromEntries((d.modelStats || []).map(ms => [ms.model, {
-    tools: 0,
-    errors: 0,
-    stopCounts: {},
-    toolDurationsRaw: {}
-  }]));
-  for (const step of d.steps || []) {
-    const modelMeta = modelMetaByName[step.model];
-    if (!modelMeta) continue;
-    const stepTools = step.toolCalls || [];
-    modelMeta.tools += stepTools.length;
-    modelMeta.errors += stepTools.filter(tc => tc.error).length;
-    if (step.stopReason) {
-      modelMeta.stopCounts[step.stopReason] = (modelMeta.stopCounts[step.stopReason] || 0) + 1;
-    }
-    for (const tc of stepTools) {
-      if (!tc.durationMs || !tc.name) continue;
-      if (!modelMeta.toolDurationsRaw[tc.name]) modelMeta.toolDurationsRaw[tc.name] = { total: 0, count: 0 };
-      modelMeta.toolDurationsRaw[tc.name].total += tc.durationMs;
-      modelMeta.toolDurationsRaw[tc.name].count += 1;
-    }
-  }
-  
-  const totalCls = cacheHitCls(d.cacheHitRate);
-  const modelRows = (d.modelStats || []).map(ms => {
-    const cls = cacheHitCls(ms.cacheHit);
-    const meta = modelMetaByName[ms.model] || { tools: 0, errors: 0, stopCounts: {}, toolDurationsRaw: {} };
-    const metaStop = Object.keys(meta.stopCounts).length
-      ? Object.entries(meta.stopCounts).map(([name, count]) => `${name}:${count}`).join('\n')
-      : '–';
-    const metaToolDurations = Object.keys(meta.toolDurationsRaw).length
-      ? Object.entries(meta.toolDurationsRaw).map(([name, data]) => `${name} ${formatMs(Math.round(data.total / data.count))}`).join('\n')
-      : '–';
-    return `<tr>
-      <td class="model-name">${ms.model}</td>
-      <td>${ms.input.toLocaleString()}</td>
-      <td>${ms.output.toLocaleString()}</td>
-      <td>${ms.cacheRead.toLocaleString()}</td>
-      <td>${ms.cacheWrite.toLocaleString()}</td>
-      <td><span class="val ${cls}">${ms.cacheHit.toFixed(1)}%</span></td>
-      <td>${ms.steps}</td>
-      <td>$${ms.cost.toFixed(4)}</td>
-    </tr>
-    <tr>
-      <td class="row-label">Tools</td>
-      <td>${meta.tools}</td>
-      <td class="row-label">Errors</td>
-      <td><span class="val ${meta.errors > 0 ? 'bad' : 'good'}">${meta.errors}</span></td>
-      <td class="row-label">Stop</td>
-      <td class="wide-cell">${metaStop}</td>
-      <td class="row-label">Tool durations</td>
-      <td class="wide-cell">${metaToolDurations}</td>
-    </tr>`;
-  }).join('');
-
-  const numModels = (d.modelStats || []).length;
-  const totalRow = numModels <= 1 ? '' : `<tr>
-    <td class="total-name">Total</td>
-    <td>${d.totalInput.toLocaleString()}</td>
-    <td>${d.totalOutput.toLocaleString()}</td>
-    <td>${d.totalCacheRead.toLocaleString()}</td>
-    <td>${d.totalCacheWrite.toLocaleString()}</td>
-    <td><span class="val ${totalCls}">${d.cacheHitRate.toFixed(1)}%</span></td>
-    <td>${d.steps.length}</td>
-    <td>$${d.totalCost.toFixed(4)}</td>
-  </tr>
-  <tr>
-    <td class="row-label">Tools</td>
-    <td>${totalMeta.tools}</td>
-    <td class="row-label">Errors</td>
-    <td><span class="val ${totalMeta.errors > 0 ? 'bad' : 'good'}">${totalMeta.errors}</span></td>
-    <td class="row-label">Stop</td>
-    <td class="wide-cell">${totalMeta.stop}</td>
-    <td class="row-label">Tool durations</td>
-    <td class="wide-cell">${totalMeta.toolDurations}</td>
-  </tr>`;
-
-  document.getElementById('stats').innerHTML = `
-    <div class="stats-grid">
-      <div class="stats-card">
-        <h3>Usage Summary</h3>
-        <table class="stats-table">
+  const children = d.children || [];
+  const sessionRows = [{
+    main: true,
+    agent: d.agent,
+    id: d.id,
+    label: d.title || d.project || d.id,
+    date: d.date,
+    model: d.model,
+    input: d.totalInput,
+    output: d.totalOutput,
+    cacheRead: d.totalCacheRead,
+    cacheWrite: d.totalCacheWrite,
+    cacheHit: d.cacheHitRate,
+    steps: d.steps.length,
+    cost: d.totalCost,
+  }].concat(children.map(child => ({
+    main: false,
+    agent: child.agent,
+    id: child.id,
+    label: child.title || child.project || child.id,
+    date: child.date,
+    model: child.model,
+    input: child.totalInput || 0,
+    output: child.totalOutput || 0,
+    cacheRead: child.totalCacheRead || 0,
+    cacheWrite: child.totalCacheWrite || 0,
+    cacheHit: child.cacheHitRate,
+    steps: child.steps || 0,
+    cost: child.totalCost || 0,
+  })));
+  const sessionTokens = row => row.input + row.output + row.cacheRead + row.cacheWrite;
+  const perMillion = (cost, tokens) => `$${((cost / Math.max(tokens, 1)) * 1e6).toFixed(2)}`;
+  const sessionsTotal = sessionRows.reduce((acc, row) => ({
+    tokens: acc.tokens + sessionTokens(row),
+    cost: acc.cost + row.cost,
+    steps: acc.steps + row.steps,
+  }), { tokens: 0, cost: 0, steps: 0 });
+  relationBlocks.push(`
+    <div class="relation-card">
+      <div class="label">Sessions (${sessionRows.length})</div>
+      <table class="children-table">
+        <thead>
           <tr>
-            <th>Model</th><th>Input</th><th>Output</th><th>Cache R</th><th>Cache W</th><th>Cache Hit</th><th>Steps</th><th>Cost</th>
+            <th>Session</th>
+            <th>Started</th>
+            <th>Model</th>
+            <th class="num">Input</th>
+            <th class="num">Output</th>
+            <th class="num">Cache R</th>
+            <th class="num">Cache W</th>
+            <th class="num">Cache Hit</th>
+            <th class="num">Steps</th>
+            <th class="num">Cost</th>
+            <th class="num">$/1M</th>
           </tr>
-          ${totalRow}
-          ${modelRows}
-        </table>
-      </div>
+        </thead>
+        <tbody>
+          ${sessionRows.map(row => `
+            <tr class="${row.main ? 'main-session' : 'sub-session'}">
+              <td>
+                ${row.main
+                  ? `<span class="session-self">${escHtml(row.label)}</span>`
+                  : `<span class="session-indent">└</span><a class="session-link" href="/detail?agent=${encodeURIComponent(row.agent)}&id=${encodeURIComponent(row.id)}">${escHtml(row.label)}</a>`}
+              </td>
+              <td class="session-date">${escHtml(row.date || '–')}</td>
+              <td>${escHtml(row.model || '–')}</td>
+              <td class="num">${row.input.toLocaleString()}</td>
+              <td class="num">${row.output.toLocaleString()}</td>
+              <td class="num">${row.cacheRead.toLocaleString()}</td>
+              <td class="num">${row.cacheWrite.toLocaleString()}</td>
+              <td class="num">${Number.isFinite(row.cacheHit) ? row.cacheHit.toFixed(1) + '%' : '–'}</td>
+              <td class="num">${row.steps.toLocaleString()}</td>
+              <td class="num">$${row.cost.toFixed(4)}</td>
+              <td class="num">${perMillion(row.cost, sessionTokens(row))}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+        <tfoot>
+          ${children.length ? `
+          <tr>
+            <td class="row-label" colspan="8">Total (main + ${children.length} subsession${children.length === 1 ? '' : 's'})</td>
+            <td class="num">${sessionsTotal.steps.toLocaleString()}</td>
+            <td class="num">$${sessionsTotal.cost.toFixed(4)}</td>
+            <td class="num">${perMillion(sessionsTotal.cost, sessionsTotal.tokens)}</td>
+          </tr>` : ''}
+        </tfoot>
+      </table>
     </div>
-  `;
+  `);
+  relationsEl.innerHTML = relationBlocks.join('');
 
   const labels = d.steps.map(s => 'S' + s.step);
   const inputAcc = cumulate(d.steps.map(s => s.input));

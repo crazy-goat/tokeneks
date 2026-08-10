@@ -32,18 +32,26 @@ func TestExpandHome_BareTilde(t *testing.T) {
 	}
 }
 
-func TestInitClaudePrices_CurrentModels(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	prices := initClaudePrices()
+func TestClaudeBuiltinPrices_CurrentModels(t *testing.T) {
+	// Reads claudeBuiltinPriceWindows directly rather than going through
+	// claudeGlobalModelPrices, so this test isn't sensitive to HOME (no
+	// store/JSON overlay involved) or to memoization state left behind by
+	// other tests in the same run. Only models with a single, open-ended
+	// window belong here — claude-sonnet-5 has a scheduled price change and
+	// is covered separately by TestClaudePrices_Sonnet5DatedWindows.
 	cases := map[string]compute.ModelPrices{
-		"claude-opus-5":             {Input: 5, CacheCreation: 6.25, CacheRead: 0.5, Output: 25, SupportsCacheCreation: true},
-		"claude-opus-4-8":           {Input: 5, CacheCreation: 6.25, CacheRead: 0.5, Output: 25, SupportsCacheCreation: true},
-		"claude-opus-4-7":           {Input: 5, CacheCreation: 6.25, CacheRead: 0.5, Output: 25, SupportsCacheCreation: true},
-		"claude-fable-5":            {Input: 10, CacheCreation: 12.5, CacheRead: 1, Output: 50, SupportsCacheCreation: true},
-		"claude-haiku-4-5-20251001": {Input: 1, CacheCreation: 1.25, CacheRead: 0.1, Output: 5, SupportsCacheCreation: true},
+		"claude-opus-5":             {Input: 5, CacheCreation: 6.25, CacheCreation1h: 10, CacheRead: 0.5, Output: 25, SupportsCacheCreation: true},
+		"claude-opus-4-8":           {Input: 5, CacheCreation: 6.25, CacheCreation1h: 10, CacheRead: 0.5, Output: 25, SupportsCacheCreation: true},
+		"claude-opus-4-7":           {Input: 5, CacheCreation: 6.25, CacheCreation1h: 10, CacheRead: 0.5, Output: 25, SupportsCacheCreation: true},
+		"claude-fable-5":            {Input: 10, CacheCreation: 12.5, CacheCreation1h: 20, CacheRead: 1, Output: 50, SupportsCacheCreation: true},
+		"claude-haiku-4-5-20251001": {Input: 1, CacheCreation: 1.25, CacheCreation1h: 2, CacheRead: 0.1, Output: 5, SupportsCacheCreation: true},
 	}
 	for model, want := range cases {
-		if got := prices[model]; got != want {
+		got, ok := resolveClaudeWindow(claudeBuiltinPriceWindows[model], time.Now())
+		if !ok {
+			t.Fatalf("no built-in price window for %s", model)
+		}
+		if got != want {
 			t.Errorf("price for %s = %+v, want %+v", model, got, want)
 		}
 	}

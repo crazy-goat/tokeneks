@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 )
@@ -36,6 +37,166 @@ func TestOpen_CreatesSchema(t *testing.T) {
 		if !got[want] {
 			t.Errorf("missing table %q", want)
 		}
+	}
+}
+
+// TestMigrate_AddsCacheWrite1hColumn simulates a database created before the
+// cache-write TTL split shipped: the message table exists but has no
+// cache_write_1h column. Open() must add it (defaulting existing rows to 0,
+// which is the harmless pre-fix behavior) rather than failing.
+func TestMigrate_AddsCacheWrite1hColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(`
+		CREATE TABLE session (agent TEXT, session_id TEXT, project TEXT, parent_id TEXT,
+		  created_at INTEGER, last_activity INTEGER, PRIMARY KEY (agent, session_id));
+		CREATE TABLE message (
+		  id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, session_id TEXT, msg_index INTEGER,
+		  role TEXT, content TEXT, model TEXT, provider TEXT,
+		  input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+		  cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0,
+		  cost REAL NOT NULL DEFAULT 0, stop_reason TEXT, thinking TEXT, response TEXT,
+		  tool_call_id TEXT, created_at INTEGER NOT NULL);
+		INSERT INTO message
+		  (agent, session_id, msg_index, role, content, model, provider,
+		   stop_reason, thinking, response, tool_call_id, cache_write, created_at)
+		  VALUES ('claude', 's1', 0, 'assistant', '', '', '', '', '', '', '', 42, 1000);
+	`); err != nil {
+		t.Fatalf("seed old schema: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on pre-migration db: %v", err)
+	}
+	defer st.Close()
+
+	msgs, err := st.GetMessages(context.Background(), "claude", "s1")
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("len(msgs)=%d, want 1", len(msgs))
+	}
+	if msgs[0].CacheWrite != 42 {
+		t.Errorf("CacheWrite = %d, want 42 (untouched by migration)", msgs[0].CacheWrite)
+	}
+	if msgs[0].CacheWrite1h != 0 {
+		t.Errorf("CacheWrite1h = %d, want 0 for a pre-migration row", msgs[0].CacheWrite1h)
+	}
+}
+
+// TestMigrate_AddsModelPriceEffectiveWindow simulates a database created
+// before model_price grew a validity window: the table exists under the
+// old (provider, model) primary key, with no effective_from/effective_to
+// columns. Open() must rebuild it (see migrateModelPriceEffectiveWindow)
+// without losing any row, and every pre-existing row must come back fully
+// open (effective_from=0, effective_to=0) — the same rate it already
+// applied at every timestamp, so the migration itself changes no report's
+// numbers.
+func TestMigrate_AddsModelPriceEffectiveWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(`
+		CREATE TABLE model_price (
+		  provider       TEXT    NOT NULL,
+		  model          TEXT    NOT NULL,
+		  name           TEXT,
+		  input          REAL    NOT NULL DEFAULT 0,
+		  output         REAL    NOT NULL DEFAULT 0,
+		  cache_read     REAL    NOT NULL DEFAULT 0,
+		  cache_write    REAL    NOT NULL DEFAULT 0,
+		  cache_write_1h REAL    NOT NULL DEFAULT 0,
+		  source         TEXT    NOT NULL,
+		  updated_at     INTEGER NOT NULL,
+		  PRIMARY KEY (provider, model)
+		);
+		INSERT INTO model_price (provider, model, name, input, output, cache_read, cache_write, cache_write_1h, source, updated_at)
+		  VALUES ('anthropic', 'claude-opus-5', 'Opus 5', 5.0, 25.0, 0.5, 6.25, 10.0, 'models.dev', 1000);
+	`); err != nil {
+		t.Fatalf("seed old schema: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on pre-migration db: %v", err)
+	}
+	defer st.Close()
+
+	prices, err := st.GetModelPrices(context.Background(), "anthropic")
+	if err != nil {
+		t.Fatalf("GetModelPrices: %v", err)
+	}
+	if len(prices) != 1 {
+		t.Fatalf("len(prices)=%d, want 1: %+v", len(prices), prices)
+	}
+	p := prices[0]
+	if p.Model != "claude-opus-5" || p.Input != 5.0 || p.Output != 25.0 || p.CacheWrite1h != 10.0 {
+		t.Errorf("row corrupted by migration: %+v", p)
+	}
+	if p.EffectiveFrom != 0 || p.EffectiveTo != 0 {
+		t.Errorf("EffectiveFrom/To = %d/%d, want 0/0 (fully open) for a pre-migration row", p.EffectiveFrom, p.EffectiveTo)
+	}
+
+	// Re-opening an already-migrated database must be a no-op, not a
+	// second attempt to rename a table that no longer exists.
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	st2, err := Open(path)
+	if err != nil {
+		t.Fatalf("second Open (idempotency): %v", err)
+	}
+	defer st2.Close()
+	prices2, err := st2.GetModelPrices(context.Background(), "anthropic")
+	if err != nil {
+		t.Fatalf("GetModelPrices after second Open: %v", err)
+	}
+	if len(prices2) != 1 || prices2[0].Model != "claude-opus-5" {
+		t.Errorf("row lost or duplicated across idempotent migration: %+v", prices2)
+	}
+}
+
+// A (provider, model) pair with more than one effective window (a derived
+// rate that changed mid-window, see prices_derive.go) must store and
+// retrieve every window, not just one — the primary key extension to
+// effective_from is what makes that possible.
+func TestUpsertModelPrices_MultipleWindowsPerModel(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	err := st.UpsertModelPrices(ctx, []ModelPrice{
+		{Provider: "derived:opencode", Model: "GPT 5.6 Luna", Input: 5.0, Output: 25.0, Source: "derived", UpdatedAt: 1, EffectiveFrom: 0, EffectiveTo: 1000},
+		{Provider: "derived:opencode", Model: "GPT 5.6 Luna", Input: 1.1, Output: 6.6, Source: "derived", UpdatedAt: 1, EffectiveFrom: 1000, EffectiveTo: 0},
+	})
+	if err != nil {
+		t.Fatalf("UpsertModelPrices: %v", err)
+	}
+
+	prices, err := st.GetModelPrices(ctx, "derived:opencode")
+	if err != nil {
+		t.Fatalf("GetModelPrices: %v", err)
+	}
+	if len(prices) != 2 {
+		t.Fatalf("len(prices)=%d, want 2 windows: %+v", len(prices), prices)
+	}
+	if prices[0].EffectiveFrom != 0 || prices[0].EffectiveTo != 1000 || prices[0].Input != 5.0 {
+		t.Errorf("window 0 = %+v, want the pre-shift window", prices[0])
+	}
+	if prices[1].EffectiveFrom != 1000 || prices[1].EffectiveTo != 0 || prices[1].Input != 1.1 {
+		t.Errorf("window 1 = %+v, want the post-shift window", prices[1])
 	}
 }
 

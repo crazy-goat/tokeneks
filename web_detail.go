@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"tokeneks/compute"
@@ -28,19 +29,22 @@ type ToolCallInfo struct {
 }
 
 type StepInfo struct {
-	Step       int            `json:"step"`
-	Timestamp  string         `json:"timestamp,omitempty"`
-	Model      string         `json:"model,omitempty"`
-	Input      int            `json:"input"`
-	Output     int            `json:"output"`
-	CacheRead  int            `json:"cacheRead"`
-	CacheWrite int            `json:"cacheWrite"`
-	Cost       float64        `json:"cost"`
-	Thinking   string         `json:"thinking,omitempty"`
-	Response   string         `json:"response,omitempty"`
-	UserPrompt string         `json:"userPrompt,omitempty"`
-	StopReason string         `json:"stopReason,omitempty"`
-	ToolCalls  []ToolCallInfo `json:"toolCalls,omitempty"`
+	Step       int    `json:"step"`
+	Timestamp  string `json:"timestamp,omitempty"`
+	Model      string `json:"model,omitempty"`
+	Input      int    `json:"input"`
+	Output     int    `json:"output"`
+	CacheRead  int    `json:"cacheRead"`
+	CacheWrite int    `json:"cacheWrite"`
+	// CacheWrite1h is the 1-hour-TTL slice of CacheWrite; Claude-only, needed
+	// to price cache writes at the right rate instead of always the 5m one.
+	CacheWrite1h int            `json:"cacheWrite1h"`
+	Cost         float64        `json:"cost"`
+	Thinking     string         `json:"thinking,omitempty"`
+	Response     string         `json:"response,omitempty"`
+	UserPrompt   string         `json:"userPrompt,omitempty"`
+	StopReason   string         `json:"stopReason,omitempty"`
+	ToolCalls    []ToolCallInfo `json:"toolCalls,omitempty"`
 }
 
 type ToolDurationStat struct {
@@ -67,6 +71,7 @@ type SessionLink struct {
 	Title           string  `json:"title"`
 	Project         string  `json:"project,omitempty"`
 	Model           string  `json:"model,omitempty"`
+	Date            string  `json:"date,omitempty"`
 	TotalInput      int     `json:"totalInput,omitempty"`
 	TotalOutput     int     `json:"totalOutput,omitempty"`
 	TotalCacheRead  int     `json:"totalCacheRead,omitempty"`
@@ -107,6 +112,18 @@ type SessionDetail struct {
 	MaxResponseLen  int                `json:"maxResponseLen"`
 	ToolDurations   []ToolDurationStat `json:"toolDurations,omitempty"`
 	ModelStats      []ModelStats       `json:"modelStats,omitempty"`
+}
+
+// sortChildrenByDate orders subsessions oldest first. Children without a date
+// keep their discovery order at the end of the list.
+func sortChildrenByDate(d *SessionDetail) {
+	sort.SliceStable(d.Children, func(i, j int) bool {
+		a, b := d.Children[i].Date, d.Children[j].Date
+		if a == "" || b == "" {
+			return a != "" && b == ""
+		}
+		return a < b
+	})
 }
 
 func fillSessionStats(d *SessionDetail) {
@@ -677,7 +694,7 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	msgRole := make(map[string]string) // message_id -> role
+	msgRole := make(map[string]string)  // message_id -> role
 	msgModel := make(map[string]string) // message_id -> modelID
 	for msgRows.Next() {
 		var mid, role, modelID string
@@ -770,19 +787,19 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 			} else {
 				pendingThinking = t
 			}
-	case "step-finish":
-		stopReason := part.Reason
-		if stopReason == "tool-calls" {
-			stopReason = "toolUse"
-		}
-		stepModel := modelName
-		if m, ok := msgModel[msgID]; ok && m != "" {
-			stepModel = m
-		}
-		s := StepInfo{
-			Step:       len(steps) + 1,
-			Timestamp:  time.Unix(ts/1000, (ts%1000)*int64(time.Millisecond)).UTC().Format(time.RFC3339),
-			Model:      stepModel,
+		case "step-finish":
+			stopReason := part.Reason
+			if stopReason == "tool-calls" {
+				stopReason = "toolUse"
+			}
+			stepModel := modelName
+			if m, ok := msgModel[msgID]; ok && m != "" {
+				stepModel = m
+			}
+			s := StepInfo{
+				Step:       len(steps) + 1,
+				Timestamp:  time.Unix(ts/1000, (ts%1000)*int64(time.Millisecond)).UTC().Format(time.RFC3339),
+				Model:      stepModel,
 				Input:      part.Tokens.Input,
 				Output:     part.Tokens.Output,
 				CacheRead:  part.Tokens.Cache.Read,
@@ -850,13 +867,17 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 		}
 		d.Parent = &SessionLink{Agent: "OpenCode", ID: parentID, Title: parentTitle}
 	}
-	childRows, err := db.Query("SELECT id, title, json_extract(model, '$.id'), ifnull(tokens_input,0), ifnull(tokens_output,0), ifnull(tokens_cache_read,0), ifnull(tokens_cache_write,0), cost FROM session WHERE parent_id = ? ORDER BY time_created ASC", sessionID)
+	childRows, err := db.Query("SELECT id, title, json_extract(model, '$.id'), ifnull(tokens_input,0), ifnull(tokens_output,0), ifnull(tokens_cache_read,0), ifnull(tokens_cache_write,0), cost, ifnull(time_created,0) FROM session WHERE parent_id = ? ORDER BY time_created ASC", sessionID)
 	if err == nil {
 		defer childRows.Close()
 		for childRows.Next() {
 			var child SessionLink
-			if err := childRows.Scan(&child.ID, &child.Title, &child.Model, &child.TotalInput, &child.TotalOutput, &child.TotalCacheRead, &child.TotalCacheWrite, &child.TotalCost); err == nil {
+			var childCreated int64
+			if err := childRows.Scan(&child.ID, &child.Title, &child.Model, &child.TotalInput, &child.TotalOutput, &child.TotalCacheRead, &child.TotalCacheWrite, &child.TotalCost, &childCreated); err == nil {
 				child.Agent = "OpenCode"
+				if childCreated > 0 {
+					child.Date = time.Unix(childCreated/1000, 0).UTC().Format("2006-01-02 15:04")
+				}
 				child.Steps, _ = ocStepCount(db, child.ID)
 				if child.TotalInput+child.TotalCacheRead > 0 {
 					child.CacheHitRate = float64(child.TotalCacheRead) / float64(child.TotalInput+child.TotalCacheRead) * 100
@@ -1035,15 +1056,18 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 	sessID := piSessionIDFromPath(fp)
 	projectDir := filepath.Base(filepath.Dir(fp))
 	project := cleanProjectName(projectDir)
-	if parentPath, parentID, ok := piParentSessionInfo(fp); ok {
+	// Subagent sessions inherit the parent's project — for the nested layout
+	// the session file itself lives below the project directory, so the name
+	// has to be taken from the parent's path.
+	var parent *SessionLink
+	if parentPath, parentID, ok := piResolveParent(fp); ok {
 		projectDir = filepath.Base(filepath.Dir(parentPath))
 		project = cleanProjectName(projectDir)
 		parentTitle := project
 		if parentData, err := piSessionUsage(parentPath); err == nil && parentData.Title != "" {
 			parentTitle = parentData.Title
 		}
-		dParent := &SessionLink{Agent: "PI", ID: parentID, Title: parentTitle, Project: project}
-		_ = dParent
+		parent = &SessionLink{Agent: "PI", ID: parentID, Title: parentTitle, Project: project}
 	}
 
 	var totalCost float64
@@ -1060,13 +1084,7 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 		Steps:     steps,
 		TotalCost: totalCost,
 	}
-	if parentPath, parentID, ok := piParentSessionInfo(fp); ok {
-		parentTitle := project
-		if parentData, err := piSessionUsage(parentPath); err == nil && parentData.Title != "" {
-			parentTitle = parentData.Title
-		}
-		d.Parent = &SessionLink{Agent: "PI", ID: parentID, Title: parentTitle, Project: project}
-	}
+	d.Parent = parent
 	for _, childPath := range piSubsessionPaths(fp) {
 		childDetail, err := piSessionDetail(childPath)
 		if err != nil {
@@ -1082,6 +1100,7 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 			Title:           childTitle,
 			Project:         childDetail.Project,
 			Model:           childDetail.Model,
+			Date:            childDetail.Date,
 			TotalInput:      childDetail.TotalInput,
 			TotalOutput:     childDetail.TotalOutput,
 			TotalCacheRead:  childDetail.TotalCacheRead,
@@ -1091,6 +1110,7 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 			TotalCost:       childDetail.TotalCost,
 		})
 	}
+	sortChildrenByDate(d)
 	fillSessionStats(d)
 	return d, scanner.Err()
 }
@@ -1123,6 +1143,11 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 				OutputTokens             int `json:"output_tokens"`
+				// CacheCreation splits the total above by TTL; only the 1h
+				// slice is needed since 5m is whatever remains of the total.
+				CacheCreation struct {
+					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+				} `json:"cache_creation"`
 			} `json:"usage"`
 		} `json:"message,omitempty"`
 		Cwd string `json:"cwd"`
@@ -1221,18 +1246,25 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 		idx, exists := msgIndexByID[msg.Message.ID]
 		if !exists {
 			prices := claudeGlobalModelPrices()[msg.Message.Model]
-			cost := compute.PiStepActualCost(compute.StepData{Input: u.InputTokens, CacheCreation: u.CacheCreationInputTokens, CacheRead: u.CacheReadInputTokens, Output: u.OutputTokens}, prices)
+			cost := compute.PiStepActualCost(compute.StepData{
+				Input:           u.InputTokens,
+				CacheCreation:   u.CacheCreationInputTokens,
+				CacheCreation1h: u.CacheCreation.Ephemeral1hInputTokens,
+				CacheRead:       u.CacheReadInputTokens,
+				Output:          u.OutputTokens,
+			}, prices)
 			steps = append(steps, StepInfo{
-				Step:       len(steps) + 1,
-				Timestamp:  msg.Timestamp,
-				Model:      msg.Message.Model,
-				Input:      u.InputTokens,
-				Output:     u.OutputTokens,
-				CacheRead:  u.CacheReadInputTokens,
-				CacheWrite: u.CacheCreationInputTokens,
-				Cost:       cost,
-				StopReason: msg.Message.StopReason,
-				UserPrompt: lastUserPrompt,
+				Step:         len(steps) + 1,
+				Timestamp:    msg.Timestamp,
+				Model:        msg.Message.Model,
+				Input:        u.InputTokens,
+				Output:       u.OutputTokens,
+				CacheRead:    u.CacheReadInputTokens,
+				CacheWrite:   u.CacheCreationInputTokens,
+				CacheWrite1h: u.CacheCreation.Ephemeral1hInputTokens,
+				Cost:         cost,
+				StopReason:   msg.Message.StopReason,
+				UserPrompt:   lastUserPrompt,
 			})
 			lastUserPrompt = ""
 			idx = len(steps) - 1
@@ -1332,10 +1364,12 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 				child.CacheHitRate = childDetail.CacheHitRate
 				child.Steps = len(childDetail.Steps)
 				child.TotalCost = childDetail.TotalCost
+				child.Date = childDetail.Date
 			}
 			d.Children = append(d.Children, child)
 		}
 	}
+	sortChildrenByDate(d)
 	fillSessionStats(d)
 	return d, scanner.Err()
 }

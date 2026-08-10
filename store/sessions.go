@@ -122,9 +122,9 @@ func (s *Store) IngestSession(ctx context.Context, ps ParsedSession) error {
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO message
 		  (agent, session_id, msg_index, role, content, model, provider,
-		   input_tokens, output_tokens, cache_read, cache_write, cost,
+		   input_tokens, output_tokens, cache_read, cache_write, cache_write_1h, cost,
 		   stop_reason, thinking, response, tool_call_id, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`)
 	if err != nil {
 		return err
@@ -144,7 +144,7 @@ func (s *Store) IngestSession(ctx context.Context, ps ParsedSession) error {
 		res, err := stmt.ExecContext(ctx,
 			pm.Message.Agent, pm.Message.SessionID, pm.Message.MsgIndex, pm.Message.Role,
 			pm.Message.Content, pm.Message.Model, pm.Message.Provider,
-			pm.Message.InputTokens, pm.Message.OutputTokens, pm.Message.CacheRead, pm.Message.CacheWrite,
+			pm.Message.InputTokens, pm.Message.OutputTokens, pm.Message.CacheRead, pm.Message.CacheWrite, pm.Message.CacheWrite1h,
 			pm.Message.Cost, pm.Message.StopReason, pm.Message.Thinking, pm.Message.Response,
 			pm.Message.ToolCallID, pm.Message.CreatedAt)
 		if err != nil {

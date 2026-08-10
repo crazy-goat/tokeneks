@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,115 +18,359 @@ const defaultClaudeSessions = "~/.claude/projects"
 const defaultClaudePricing = "~/.tokeneks/claude_models.json"
 
 var (
+	claudePricesMu   sync.Mutex
 	claudePricesOnce sync.Once
-	claudePrices     map[string]compute.ModelPrices
+	// claudeStoreOverlay and claudeJSONOverlay are the memoized sync/user
+	// overlays, kept separate (rather than pre-merged into one map) because
+	// they sit at different precedence relative to claudeBuiltinPriceWindows
+	// — see claudeModelPricesAt.
+	claudeStoreOverlay map[string]compute.ModelPrices
+	claudeJSONOverlay  map[string]compute.ModelPrices
+)
+
+// claudeUnknownWarnOut is where the once-per-model "no price" warning goes.
+// It's a var, not a direct os.Stderr call, so tests can capture it instead
+// of writing to real stderr, and so production code has one obvious place
+// that must never become stdout — stdout carries reports and must stay
+// parseable.
+var claudeUnknownWarnOut io.Writer = os.Stderr
+
+var (
+	claudeUnknownWarnMu sync.Mutex
+	claudeUnknownWarned = map[string]bool{}
 )
 
 type claudePricesFile map[string]struct {
 	Input         float64 `json:"input"`
 	CacheCreation float64 `json:"cacheCreation"`
-	CacheRead     float64 `json:"cacheRead"`
-	Output        float64 `json:"output"`
+	// CacheCreation1h is a pointer so a missing key can default to 2x Input
+	// (Anthropic's 1h-TTL rate) instead of silently pricing 1h writes at 0.
+	CacheCreation1h *float64 `json:"cacheCreation1h"`
+	CacheRead       float64  `json:"cacheRead"`
+	Output          float64  `json:"output"`
 }
 
+// claudeGlobalModelPrices returns the effective Claude price table resolved
+// at the current moment, applying the same precedence as claudeModelPricesAt
+// to every model either layer knows about.
+//
+// This exists for the many callers outside this file that only want "the
+// price right now" (e.g. a reference table) and can't easily be changed
+// here. Anything pricing an actual message should prefer claudeModelPrices
+// / claudeModelPricesAt below, which also report unknown models instead of
+// silently resolving to the zero value.
 func claudeGlobalModelPrices() map[string]compute.ModelPrices {
-	claudePricesOnce.Do(func() {
-		claudePrices = initClaudePrices()
-	})
-	return claudePrices
+	now := time.Now()
+	store := claudeStoreOverlayPrices()
+	jsonOverlay := claudeJSONOverlayPrices()
+
+	models := make(map[string]bool, len(claudeBuiltinPriceWindows)+len(store)+len(jsonOverlay))
+	for model := range claudeBuiltinPriceWindows {
+		models[model] = true
+	}
+	for model := range store {
+		models[model] = true
+	}
+	for model := range jsonOverlay {
+		models[model] = true
+	}
+
+	out := make(map[string]compute.ModelPrices, len(models))
+	for model := range models {
+		// Every model here is present in at least one layer, so this can
+		// only warn (and return !ok) if that turns out false — it never
+		// does in practice, since the loop is bounded by those same layers.
+		if p, ok := claudeModelPricesAt(model, now); ok {
+			out[model] = p
+		}
+	}
+	return out
 }
 
-func initClaudePrices() map[string]compute.ModelPrices {
-	prices := map[string]compute.ModelPrices{
-		"claude-fable-5": {
-			Input:                 10.0,
-			CacheCreation:         12.5,
-			CacheRead:             1.0,
-			Output:                50.0,
-			SupportsCacheCreation: true,
-		},
-		"claude-opus-5": {
-			Input:                 5.0,
-			CacheCreation:         6.25,
-			CacheRead:             0.5,
-			Output:                25.0,
-			SupportsCacheCreation: true,
-		},
-		"claude-opus-4-8": {
-			Input:                 5.0,
-			CacheCreation:         6.25,
-			CacheRead:             0.5,
-			Output:                25.0,
-			SupportsCacheCreation: true,
-		},
-		"claude-opus-4-7": {
-			Input:                 5.0,
-			CacheCreation:         6.25,
-			CacheRead:             0.5,
-			Output:                25.0,
-			SupportsCacheCreation: true,
-		},
-		"claude-sonnet-5": {
-			Input:                 2.0,
-			CacheCreation:         2.5,
-			CacheRead:             0.2,
-			Output:                10.0,
-			SupportsCacheCreation: true,
-		},
-		"claude-sonnet-4-6": {
-			Input:                 3.0,
-			CacheCreation:         3.75,
-			CacheRead:             0.3,
-			Output:                15.0,
-			SupportsCacheCreation: true,
-		},
-		"claude-haiku-4-5-20251001": {
-			Input:                 1.0,
-			CacheCreation:         1.25,
-			CacheRead:             0.1,
-			Output:                5.0,
-			SupportsCacheCreation: true,
-		},
-		"claude-haiku-4-5": {
-			Input:                 1.0,
-			CacheCreation:         1.25,
-			CacheRead:             0.1,
-			Output:                5.0,
-			SupportsCacheCreation: true,
-		},
+// claudeModelPrices resolves a single model's price at the current moment.
+// The bool return distinguishes "no price configured" from a legitimately
+// zero rate, which a plain map lookup can't — that ambiguity is exactly
+// what let unknown models get priced at $0 without anyone noticing.
+func claudeModelPrices(model string) (compute.ModelPrices, bool) {
+	return claudeModelPricesAt(model, time.Now())
+}
+
+// claudeModelPricesAt resolves model's price as of "at", so a historical
+// message keeps the rate that was in effect when it was created even after
+// the built-in table gains a new dated window (e.g. Sonnet 5's introductory
+// pricing expiring on 2026-09-01). On a miss it warns once per model per
+// process (see warnUnknownClaudeModel) rather than returning a price that
+// looks real but isn't.
+//
+// Precedence is JSON > (multi-window built-in) > store > (single-window
+// built-in):
+//
+//   - The user's ~/.tokeneks/claude_models.json always wins — it's explicit,
+//     hand-entered intent, not an automatic sync.
+//   - A built-in entry with more than one window is only ever written when
+//     we know that model's price history explicitly (e.g. Sonnet 5's
+//     announced 2026-09-01 change), so that knowledge outranks the store.
+//     models.dev (the store's source) publishes only the currently-active
+//     rate — it has no way to express "this was the rate last month" — so
+//     letting a synced row win here would silently reprice every past
+//     session the next time `prices update` runs and picks up the new
+//     current rate. That's not a future hazard: it already happens the
+//     moment models.dev updates.
+//   - Otherwise (a single, open-ended window, the normal case) the store
+//     keeps winning as before — that's what makes syncing useful for models
+//     missing or stale in the built-in table.
+func claudeModelPricesAt(model string, at time.Time) (compute.ModelPrices, bool) {
+	if p, ok := claudeJSONOverlayPrices()[model]; ok {
+		return p, true
 	}
+
+	windows := claudeBuiltinPriceWindows[model]
+	if len(windows) > 1 {
+		if p, ok := resolveClaudeWindow(windows, at); ok {
+			return p, true
+		}
+	}
+
+	if p, ok := claudeStoreOverlayPrices()[model]; ok {
+		return p, true
+	}
+
+	if p, ok := resolveClaudeWindow(windows, at); ok {
+		return p, true
+	}
+
+	warnUnknownClaudeModel(model)
+	return compute.ModelPrices{}, false
+}
+
+// warnUnknownClaudeModel prints one warning per unknown model per process.
+// Sessions run thousands of messages through price lookups, so without the
+// dedup this would flood stderr for a single unpriced model.
+func warnUnknownClaudeModel(model string) {
+	claudeUnknownWarnMu.Lock()
+	defer claudeUnknownWarnMu.Unlock()
+	if claudeUnknownWarned[model] {
+		return
+	}
+	claudeUnknownWarned[model] = true
+	fmt.Fprintf(claudeUnknownWarnOut, "warning: no price for Claude model %q; its tokens are excluded from cost\n", model)
+}
+
+// resetClaudeUnknownWarnings clears the warned-once set. Test-only: without
+// it, whichever test looks up an unknown model first would swallow the
+// warning for every later test that reuses the same model name.
+func resetClaudeUnknownWarnings() {
+	claudeUnknownWarnMu.Lock()
+	defer claudeUnknownWarnMu.Unlock()
+	claudeUnknownWarned = map[string]bool{}
+}
+
+// resetClaudePrices drops the memoized overlays so the next lookup rebuilds
+// them. Called after a price sync, which would otherwise not be visible to a
+// command running in the same process.
+func resetClaudePrices() {
+	claudePricesMu.Lock()
+	defer claudePricesMu.Unlock()
+	claudePricesOnce = sync.Once{}
+	claudeStoreOverlay = nil
+	claudeJSONOverlay = nil
+}
+
+// claudeStoreOverlayPrices returns the memoized prices synced into the store
+// by `tokeneks prices update`, building the overlay on first use.
+func claudeStoreOverlayPrices() map[string]compute.ModelPrices {
+	claudePricesMu.Lock()
+	defer claudePricesMu.Unlock()
+	claudePricesOnce.Do(claudeInitOverlaysLocked)
+	return claudeStoreOverlay
+}
+
+// claudeJSONOverlayPrices returns the memoized ~/.tokeneks/claude_models.json
+// overlay, building it on first use.
+func claudeJSONOverlayPrices() map[string]compute.ModelPrices {
+	claudePricesMu.Lock()
+	defer claudePricesMu.Unlock()
+	claudePricesOnce.Do(claudeInitOverlaysLocked)
+	return claudeJSONOverlay
+}
+
+// claudeInitOverlaysLocked populates claudeStoreOverlay and claudeJSONOverlay.
+// Both come from initClaudeOverlays in one pass so a single sync.Once covers
+// both — they're read together often enough (claudeModelPricesAt checks JSON
+// first, then possibly falls through to store) that two independent Onces
+// would just mean two locks for no benefit. Caller must hold claudePricesMu.
+func claudeInitOverlaysLocked() {
+	claudeStoreOverlay, claudeJSONOverlay = initClaudeOverlays()
+}
+
+// claudeStorePrices reads synced anthropic prices out of the store. Returns
+// nil when the store is unavailable or has never been synced — callers fall
+// back to the built-in table.
+//
+// This opens the store if no command did so already, so that pricing is the
+// same whether you came in through `claude list` (which syncs first) or
+// `claude detail <file>` (which reads a file directly).
+func claudeStorePrices() map[string]compute.ModelPrices {
+	st := getTokeneksStore()
+	if st == nil {
+		var err error
+		st, err = openTokeneksStore()
+		if err != nil {
+			return nil
+		}
+		setTokeneksStore(st)
+	}
+	rows, err := st.GetModelPrices(context.Background(), "anthropic")
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+	out := make(map[string]compute.ModelPrices, len(rows))
+	for _, r := range rows {
+		out[r.Model] = compute.ModelPrices{
+			Input:                 r.Input,
+			CacheCreation:         r.CacheWrite,
+			CacheCreation1h:       r.CacheWrite1h,
+			CacheRead:             r.CacheRead,
+			Output:                r.Output,
+			SupportsCacheCreation: r.CacheWrite > 0,
+		}
+	}
+	return out
+}
+
+// claudePriceWindow is one dated slice of a model's price history. From is
+// inclusive, To is exclusive; a zero Time means unbounded on that side. Most
+// models have exactly one, open-ended window — only models with an
+// announced future price change (Sonnet 5's introductory rate) need more
+// than one.
+type claudePriceWindow struct {
+	from, to time.Time
+	prices   compute.ModelPrices
+}
+
+func (w claudePriceWindow) covers(at time.Time) bool {
+	if !w.from.IsZero() && at.Before(w.from) {
+		return false
+	}
+	if !w.to.IsZero() && !at.Before(w.to) {
+		return false
+	}
+	return true
+}
+
+// resolveClaudeWindow picks the window covering "at" out of an ordered list.
+func resolveClaudeWindow(windows []claudePriceWindow, at time.Time) (compute.ModelPrices, bool) {
+	for _, w := range windows {
+		if w.covers(at) {
+			return w.prices, true
+		}
+	}
+	return compute.ModelPrices{}, false
+}
+
+// claudeSonnet5PriceChange is when Sonnet 5's introductory pricing
+// ($2 in / $10 out) reverts to standard ($3 in / $15 out). Anthropic
+// announced this ahead of time, so it's hardcoded rather than something
+// `prices update` can discover — models.dev only ever publishes the
+// currently-active rate (see claudeModelPricesAt's comment on the overlay).
+var claudeSonnet5PriceChange = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+// claudeBuiltinPriceWindows is the compiled-in Claude price table, keyed by
+// model, each with its dated windows oldest-first. CacheCreation1h is
+// always 2x Input (Anthropic's 1-hour cache-write multiplier) and
+// CacheCreation is 1.25x Input (the 5-minute one); CacheRead is 0.1x Input.
+var claudeBuiltinPriceWindows = map[string][]claudePriceWindow{
+	"claude-fable-5": {{prices: compute.ModelPrices{
+		Input: 10.0, CacheCreation: 12.5, CacheCreation1h: 20.0, CacheRead: 1.0, Output: 50.0, SupportsCacheCreation: true,
+	}}},
+	"claude-opus-5": {{prices: compute.ModelPrices{
+		Input: 5.0, CacheCreation: 6.25, CacheCreation1h: 10.0, CacheRead: 0.5, Output: 25.0, SupportsCacheCreation: true,
+	}}},
+	"claude-opus-4-8": {{prices: compute.ModelPrices{
+		Input: 5.0, CacheCreation: 6.25, CacheCreation1h: 10.0, CacheRead: 0.5, Output: 25.0, SupportsCacheCreation: true,
+	}}},
+	"claude-opus-4-7": {{prices: compute.ModelPrices{
+		Input: 5.0, CacheCreation: 6.25, CacheCreation1h: 10.0, CacheRead: 0.5, Output: 25.0, SupportsCacheCreation: true,
+	}}},
+	"claude-sonnet-5": {
+		{
+			to: claudeSonnet5PriceChange,
+			prices: compute.ModelPrices{
+				Input: 2.0, CacheCreation: 2.5, CacheCreation1h: 4.0, CacheRead: 0.2, Output: 10.0, SupportsCacheCreation: true,
+			},
+		},
+		{
+			from: claudeSonnet5PriceChange,
+			prices: compute.ModelPrices{
+				Input: 3.0, CacheCreation: 3.75, CacheCreation1h: 6.0, CacheRead: 0.3, Output: 15.0, SupportsCacheCreation: true,
+			},
+		},
+	},
+	"claude-sonnet-4-6": {{prices: compute.ModelPrices{
+		Input: 3.0, CacheCreation: 3.75, CacheCreation1h: 6.0, CacheRead: 0.3, Output: 15.0, SupportsCacheCreation: true,
+	}}},
+	"claude-haiku-4-5-20251001": {{prices: compute.ModelPrices{
+		Input: 1.0, CacheCreation: 1.25, CacheCreation1h: 2.0, CacheRead: 0.1, Output: 5.0, SupportsCacheCreation: true,
+	}}},
+	"claude-haiku-4-5": {{prices: compute.ModelPrices{
+		Input: 1.0, CacheCreation: 1.25, CacheCreation1h: 2.0, CacheRead: 0.1, Output: 5.0, SupportsCacheCreation: true,
+	}}},
+}
+
+// initClaudeOverlays builds the store and JSON overlay layers. They're
+// returned separately, not merged, because claudeModelPricesAt gives them
+// different precedence relative to the built-in table (see its doc comment):
+// JSON always wins, but the store can lose to a built-in entry that already
+// knows its own price history.
+func initClaudeOverlays() (store, jsonOverlay map[string]compute.ModelPrices) {
+	store = claudeStorePrices()
 
 	b, err := os.ReadFile(expandHome(defaultClaudePricing))
 	if err != nil {
-		return prices
+		return store, nil
 	}
 
 	var file claudePricesFile
 	if err := json.Unmarshal(b, &file); err != nil {
-		return prices
+		return store, nil
 	}
 
+	jsonOverlay = make(map[string]compute.ModelPrices, len(file))
 	for model, p := range file {
-		prices[model] = compute.ModelPrices{
+		// A user's override file predates the 1h-TTL split; default it to
+		// 2x input rather than 0, or it would silently reintroduce the
+		// underpricing bug for every model listed there.
+		cc1h := 2 * p.Input
+		if p.CacheCreation1h != nil {
+			cc1h = *p.CacheCreation1h
+		}
+		jsonOverlay[model] = compute.ModelPrices{
 			Input:                 p.Input,
 			CacheCreation:         p.CacheCreation,
+			CacheCreation1h:       cc1h,
 			CacheRead:             p.CacheRead,
 			Output:                p.Output,
 			SupportsCacheCreation: p.CacheCreation > 0,
 		}
 	}
-	return prices
+	return store, jsonOverlay
 }
 
 type claudeMessage struct {
 	Type    string `json:"type"`
 	Message struct {
+		ID    string `json:"id"`
 		Model string `json:"model"`
 		Usage struct {
 			InputTokens              int `json:"input_tokens"`
 			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 			OutputTokens             int `json:"output_tokens"`
+			// CacheCreation splits the total above by TTL; only the 1h slice
+			// is needed since 5m is whatever remains of the total.
+			CacheCreation struct {
+				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+			} `json:"cache_creation"`
 		} `json:"usage"`
 		Content []struct {
 			Type string `json:"type"`
@@ -163,6 +409,12 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 	var toolCalls int
 	var lastUserPrompt string
 	var lastActivity time.Time
+	// stepIndexByID collapses the several JSONL lines Claude Code writes for
+	// one assistant message (one line per content block, each repeating the
+	// identical message.usage) into the single step web_detail.go's
+	// msgIndexByID already produces. Without it, a message with N content
+	// blocks got its usage counted N times — see the bug this fixes.
+	stepIndexByID := make(map[string]int)
 	scanner := newJSONLScanner(f)
 
 	for scanner.Scan() {
@@ -181,12 +433,40 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 		}
 		if msg.Message.Usage.InputTokens+msg.Message.Usage.CacheCreationInputTokens+
 			msg.Message.Usage.CacheReadInputTokens+msg.Message.Usage.OutputTokens == 0 {
+			// A zero-usage line never registers in stepIndexByID (it continues
+			// before reaching that logic below), so even if it happens to
+			// share an id with a real line elsewhere in the file, it can
+			// neither spawn a phantom step nor overwrite the real usage.
 			continue
 		}
 
+		// toolCalls is per content block, not per message, and every
+		// surviving line contributes its own blocks regardless of whether
+		// this line ends up creating a step or merging into one — a message
+		// split across three lines with one tool_use block each must still
+		// report three tool calls after dedup.
 		for _, c := range msg.Message.Content {
 			if c.Type == "tool_use" {
 				toolCalls++
+			}
+		}
+
+		// message.id ties every content-block line of one assistant message
+		// together. web_detail.go drops id-less lines outright (it's
+		// attributing per-block detail — thinking/text/tool-calls — that
+		// can't be merged without a key); here we're only summing usage for
+		// cost, so dropping the line would silently lose real tokens instead
+		// of just failing to merge them. An id-less line is therefore kept
+		// as its own, undeduplicated step. In practice this doesn't seem to
+		// come up: message.id has been present on every assistant line
+		// sampled from real session files.
+		id := msg.Message.ID
+		if id != "" {
+			if _, exists := stepIndexByID[id]; exists {
+				// Later block of an already-seen message: usage is
+				// identical on every line sharing this id, so it was
+				// already counted when the step was created below.
+				continue
 			}
 		}
 
@@ -194,12 +474,16 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 		steps = append(steps, claudeSessionStep{
 			Model: msg.Message.Model,
 			Step: compute.StepData{
-				Input:         msg.Message.Usage.InputTokens,
-				CacheCreation: msg.Message.Usage.CacheCreationInputTokens,
-				CacheRead:     msg.Message.Usage.CacheReadInputTokens,
-				Output:        msg.Message.Usage.OutputTokens,
+				Input:           msg.Message.Usage.InputTokens,
+				CacheCreation:   msg.Message.Usage.CacheCreationInputTokens,
+				CacheCreation1h: msg.Message.Usage.CacheCreation.Ephemeral1hInputTokens,
+				CacheRead:       msg.Message.Usage.CacheReadInputTokens,
+				Output:          msg.Message.Usage.OutputTokens,
 			},
 		})
+		if id != "" {
+			stepIndexByID[id] = len(steps) - 1
+		}
 	}
 	return claudeMessageResult{Steps: steps, Models: models, ToolCalls: toolCalls, LastUserPrompt: lastUserPrompt, LastActivity: lastActivity}, scanner.Err()
 }
@@ -359,8 +643,17 @@ func claudeDetail(input string) error {
 		modelCount[m]++
 	}
 	primaryModel := dominantModel(modelCount)
-	prices := claudeGlobalModelPrices()[primaryModel]
-	if prices.Input == 0 {
+
+	// Price as of when this session actually happened, not when this report
+	// runs, so a July session keeps costing what it cost in July. LastActivity
+	// is the same timestamp claudeSessions already uses to bucket a session
+	// into a date/day-range, so this stays consistent with that.
+	at := res.LastActivity
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	if _, ok := claudeModelPricesAt(primaryModel, at); !ok {
 		return fmt.Errorf("no prices configured for model %s", primaryModel)
 	}
 
@@ -381,8 +674,8 @@ func claudeDetail(input string) error {
 
 	var totalActual, totalIdeal float64
 	for i, model := range modelNames {
-		prices := claudeGlobalModelPrices()[model]
-		if prices.Input == 0 {
+		prices, ok := claudeModelPricesAt(model, at)
+		if !ok {
 			return fmt.Errorf("no prices configured for model %s", model)
 		}
 		if i > 0 {
@@ -438,8 +731,11 @@ func claudeList(days int, date string) error {
 		byModel := groupStepsByModel(res.Steps)
 		valid := true
 		for model := range byModel {
-			prices := claudeGlobalModelPrices()[model]
-			if prices.Input == 0 {
+			// Price this session's models as of when the session happened
+			// (LastActivity), not "now" — otherwise a Sonnet 5 session from
+			// before 2026-09-01 would silently reprice itself at the
+			// post-cutover rate once that date passes.
+			if _, ok := claudeModelPricesAt(model, sess.LastActivity); !ok {
 				valid = false
 				break
 			}
@@ -450,7 +746,7 @@ func claudeList(days int, date string) error {
 
 		var s compute.Summary
 		for model, modelSteps := range byModel {
-			prices := claudeGlobalModelPrices()[model]
+			prices, _ := claudeModelPricesAt(model, sess.LastActivity)
 			rows := compute.ComputeIdealClaude(modelSteps, prices)
 			part := compute.SummarizeClaude(rows, prices)
 			s.TotalCC += part.TotalCC
@@ -484,22 +780,7 @@ func claudeList(days int, date string) error {
 		if len(project) > 25 {
 			project = project[:23] + ".."
 		}
-		modelShort := sess.DominantModel
-		if modelShort == "claude-opus-5" {
-			modelShort = "opus-5"
-		}
-		if modelShort == "claude-opus-4-7" {
-			modelShort = "opus-4.7"
-		}
-		if modelShort == "claude-sonnet-4-6" {
-			modelShort = "sonnet-4.6"
-		}
-		if modelShort == "claude-sonnet-5" {
-			modelShort = "sonnet-5"
-		}
-		if modelShort == "claude-fable-5" {
-			modelShort = "fable-5"
-		}
+		modelShort := claudeShortModelName(sess.DominantModel)
 
 		tokens := s.TotalIn + s.TotalCC + s.TotalCR + s.TotalOut
 		costPer1M := compute.PerMillion(s.Actual, tokens)
@@ -516,31 +797,40 @@ func claudeList(days int, date string) error {
 	fmt.Printf("%19s  %-36s  %-14s  %-25s  %4s  %8s  %8.2f  %7.2f  %10.2f  %6.1f%%  %8.2f  %8.2f\n",
 		"TOTAL", "", "", "", "", formatTokens(totalTokens), totalActual, totalIdeal, totalOverpay, pct, totalCostPer1M, totalIdealPer1M)
 	fmt.Println()
-	fmt.Printf("Opus5:    In=$%.2f/M  CC=$%.2f/M  CR=$%.2f/M  Out=$%.2f/M\n",
-		claudeGlobalModelPrices()["claude-opus-5"].Input,
-		claudeGlobalModelPrices()["claude-opus-5"].CacheCreation,
-		claudeGlobalModelPrices()["claude-opus-5"].CacheRead,
-		claudeGlobalModelPrices()["claude-opus-5"].Output)
-	fmt.Printf("Opus4.7:  In=$%.2f/M  CC=$%.2f/M  CR=$%.2f/M  Out=$%.2f/M\n",
-		claudeGlobalModelPrices()["claude-opus-4-7"].Input,
-		claudeGlobalModelPrices()["claude-opus-4-7"].CacheCreation,
-		claudeGlobalModelPrices()["claude-opus-4-7"].CacheRead,
-		claudeGlobalModelPrices()["claude-opus-4-7"].Output)
-	fmt.Printf("Sonnet4.6: In=$%.2f/M  CC=$%.2f/M  CR=$%.2f/M  Out=$%.2f/M\n",
-		claudeGlobalModelPrices()["claude-sonnet-4-6"].Input,
-		claudeGlobalModelPrices()["claude-sonnet-4-6"].CacheCreation,
-		claudeGlobalModelPrices()["claude-sonnet-4-6"].CacheRead,
-		claudeGlobalModelPrices()["claude-sonnet-4-6"].Output)
-	fmt.Printf("Sonnet5:   In=$%.2f/M  CC=$%.2f/M  CR=$%.2f/M  Out=$%.2f/M\n",
-		claudeGlobalModelPrices()["claude-sonnet-5"].Input,
-		claudeGlobalModelPrices()["claude-sonnet-5"].CacheCreation,
-		claudeGlobalModelPrices()["claude-sonnet-5"].CacheRead,
-		claudeGlobalModelPrices()["claude-sonnet-5"].Output)
-	fmt.Printf("Fable5:    In=$%.2f/M  CC=$%.2f/M  CR=$%.2f/M  Out=$%.2f/M\n",
-		claudeGlobalModelPrices()["claude-fable-5"].Input,
-		claudeGlobalModelPrices()["claude-fable-5"].CacheCreation,
-		claudeGlobalModelPrices()["claude-fable-5"].CacheRead,
-		claudeGlobalModelPrices()["claude-fable-5"].Output)
+	prices := claudeGlobalModelPrices()
+	for _, m := range claudeFooterModels {
+		p := prices[m.model]
+		fmt.Printf("%sIn=$%.2f/M  CC=$%.2f/M  CR=$%.2f/M  Out=$%.2f/M\n",
+			m.label, p.Input, p.CacheCreation, p.CacheRead, p.Output)
+	}
 
 	return nil
+}
+
+// claudeFooterModels drives both the `claude list` price-summary footer and
+// the DominantModel column's short display name. It's the one place to edit
+// when adding a model to either — previously each needed its own hardcoded
+// block/if-chain.
+var claudeFooterModels = []struct {
+	model string
+	label string // footer line prefix, e.g. "Opus5:    " (kept verbatim, including its original spacing)
+	short string // table column abbreviation, e.g. "opus-5"
+}{
+	{"claude-opus-5", "Opus5:    ", "opus-5"},
+	{"claude-opus-4-7", "Opus4.7:  ", "opus-4.7"},
+	{"claude-sonnet-4-6", "Sonnet4.6: ", "sonnet-4.6"},
+	{"claude-sonnet-5", "Sonnet5:   ", "sonnet-5"},
+	{"claude-fable-5", "Fable5:    ", "fable-5"},
+}
+
+// claudeShortModelName maps a Claude model name to the abbreviation used in
+// `claude list`'s DominantModel column, or returns it unchanged if it's not
+// one of the models claudeFooterModels tracks.
+func claudeShortModelName(model string) string {
+	for _, m := range claudeFooterModels {
+		if m.model == model {
+			return m.short
+		}
+	}
+	return model
 }

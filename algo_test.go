@@ -226,6 +226,70 @@ func TestPiStepActualCost_MatchesInlineFormula(t *testing.T) {
 	}
 }
 
+// Cache-write TTL split: a step with only 5m-TTL cache writes (CacheCreation1h
+// left at zero, as every un-resynced row and every non-Claude agent has it)
+// must cost exactly what the pre-split formula produced.
+func TestPiStepActualCost_5mOnly_MatchesPreSplitRate(t *testing.T) {
+	step := compute.StepData{Input: 1000, CacheCreation: 500, CacheRead: 800, Output: 200}
+	prices := compute.ModelPrices{Input: 0.95, CacheCreation: 1.0, CacheCreation1h: 1.9, CacheRead: 0.16, Output: 4.0}
+
+	got := compute.PiStepActualCost(step, prices)
+	want := float64(step.Input)*prices.Input/compute.TokensPerMillion +
+		float64(step.CacheCreation)*prices.CacheCreation/compute.TokensPerMillion +
+		float64(step.CacheRead)*prices.CacheRead/compute.TokensPerMillion +
+		float64(step.Output)*prices.Output/compute.TokensPerMillion
+
+	if math.Abs(got-want) > 1e-12 {
+		t.Errorf("5m-only cost = %f, want pre-split formula %f", got, want)
+	}
+}
+
+// Cache-write TTL split: a step whose cache writes are entirely 1h-TTL must
+// price the whole CacheCreation total at the 1h rate (2x input), not the 5m
+// rate.
+func TestPiStepActualCost_1hOnly_UsesHourlyRate(t *testing.T) {
+	step := compute.StepData{Input: 1000, CacheCreation: 500, CacheCreation1h: 500, CacheRead: 800, Output: 200}
+	prices := compute.ModelPrices{Input: 0.95, CacheCreation: 1.0, CacheCreation1h: 1.9, CacheRead: 0.16, Output: 4.0}
+
+	got := compute.PiStepActualCost(step, prices)
+	want := float64(step.Input)*prices.Input/compute.TokensPerMillion +
+		float64(step.CacheCreation1h)*prices.CacheCreation1h/compute.TokensPerMillion +
+		float64(step.CacheRead)*prices.CacheRead/compute.TokensPerMillion +
+		float64(step.Output)*prices.Output/compute.TokensPerMillion
+
+	if math.Abs(got-want) > 1e-12 {
+		t.Errorf("1h-only cost = %f, want %f (all CacheCreation at the 1h rate)", got, want)
+	}
+	// Sanity check against the old single-rate formula: pricing this step at
+	// the 5m rate throughout would have undercounted it.
+	old := float64(step.Input)*prices.Input/compute.TokensPerMillion +
+		float64(step.CacheCreation)*prices.CacheCreation/compute.TokensPerMillion +
+		float64(step.CacheRead)*prices.CacheRead/compute.TokensPerMillion +
+		float64(step.Output)*prices.Output/compute.TokensPerMillion
+	if got <= old {
+		t.Errorf("1h-priced cost %f should exceed the old 5m-rate-only cost %f", got, old)
+	}
+}
+
+// Cache-write TTL split: a step with both 5m and 1h cache writes must blend
+// the two rates rather than pricing the total at either one alone.
+func TestPiStepActualCost_MixedTTL_BlendsRates(t *testing.T) {
+	step := compute.StepData{Input: 1000, CacheCreation: 500, CacheCreation1h: 300, CacheRead: 800, Output: 200}
+	prices := compute.ModelPrices{Input: 0.95, CacheCreation: 1.0, CacheCreation1h: 1.9, CacheRead: 0.16, Output: 4.0}
+
+	got := compute.PiStepActualCost(step, prices)
+	cc5m := step.CacheCreation - step.CacheCreation1h // 200 tokens at the 5m rate
+	want := float64(step.Input)*prices.Input/compute.TokensPerMillion +
+		float64(cc5m)*prices.CacheCreation/compute.TokensPerMillion +
+		float64(step.CacheCreation1h)*prices.CacheCreation1h/compute.TokensPerMillion +
+		float64(step.CacheRead)*prices.CacheRead/compute.TokensPerMillion +
+		float64(step.Output)*prices.Output/compute.TokensPerMillion
+
+	if math.Abs(got-want) > 1e-12 {
+		t.Errorf("mixed-TTL cost = %f, want blended %f", got, want)
+	}
+}
+
 // D15: Summarize actual cost must equal sum of piStepActualCost per row
 func TestSummarize_ActualMatchesSumOfStepCosts(t *testing.T) {
 	steps := []compute.StepData{

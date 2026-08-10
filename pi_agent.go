@@ -203,9 +203,8 @@ func piSessions(days int, date string) ([]piSession, error) {
 			title = project
 		}
 		sessionName := filepath.Base(fp)
-		sessionBase := strings.TrimSuffix(sessionName, ".jsonl")
 		sessionID, _ := piSessionIDFromFilename(sessionName)
-		childCount := piSubsessionCount(filepath.Join(filepath.Dir(fp), sessionBase), cutoff, date)
+		childCount := piSubsessionCount(fp, cutoff, date)
 
 		sessions = append(sessions, piSession{
 			ID:            sessionID,
@@ -234,13 +233,26 @@ func piSessions(days int, date string) ([]piSession, error) {
 	return sessions, nil
 }
 
+// piSubsessionPaths returns the session files of every subagent spawned by
+// sessionFilepath. PI writes subagent sessions in two layouts and both are
+// covered here:
+//
+//   - nested:  <parentBase>/<shortID>/run-<N>/session.jsonl
+//   - sibling: a top-level <date>_<id>.jsonl in the same project directory
+//     whose session header carries parentSession: <parentPath>
+//
+// The sibling layout is used for subagents that run in the parent's own
+// project directory (e.g. worker/coder runs), so the nested scan alone misses
+// them — their <shortID> directory is created but left empty.
 func piSubsessionPaths(sessionFilepath string) []string {
+	paths := piSiblingSubsessionPaths(sessionFilepath)
+
 	sessionDir := strings.TrimSuffix(sessionFilepath, ".jsonl")
 	entries, err := os.ReadDir(sessionDir)
 	if err != nil {
-		return nil
+		sort.Strings(paths)
+		return paths
 	}
-	var paths []string
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -263,12 +275,33 @@ func piSubsessionPaths(sessionFilepath string) []string {
 	return paths
 }
 
-func piSubsessionCount(sessionDir string, cutoff time.Time, date string) int {
+// piSubsessionCount counts the subagent sessions of sessionFilepath that fall
+// inside the requested window. Both storage layouts are counted — see
+// piSubsessionPaths.
+func piSubsessionCount(sessionFilepath string, cutoff time.Time, date string) int {
+	inWindow := func(fp string) bool {
+		info, err := os.Stat(fp)
+		if err != nil || info.IsDir() {
+			return false
+		}
+		if date != "" {
+			return info.ModTime().UTC().Format("2006-01-02") == date
+		}
+		return !info.ModTime().Before(cutoff)
+	}
+
+	count := 0
+	for _, fp := range piSiblingSubsessionPaths(sessionFilepath) {
+		if inWindow(fp) {
+			count++
+		}
+	}
+
+	sessionDir := strings.TrimSuffix(sessionFilepath, ".jsonl")
 	entries, err := os.ReadDir(sessionDir)
 	if err != nil {
-		return 0
+		return count
 	}
-	count := 0
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -281,22 +314,93 @@ func piSubsessionCount(sessionDir string, cutoff time.Time, date string) int {
 			if !runDir.IsDir() || !strings.HasPrefix(runDir.Name(), "run-") {
 				continue
 			}
-			fp := filepath.Join(sessionDir, entry.Name(), runDir.Name(), "session.jsonl")
-			info, err := os.Stat(fp)
-			if err != nil || info.IsDir() {
-				continue
+			if inWindow(filepath.Join(sessionDir, entry.Name(), runDir.Name(), "session.jsonl")) {
+				count++
 			}
-			if date != "" {
-				if info.ModTime().UTC().Format("2006-01-02") != date {
-					continue
-				}
-			} else if info.ModTime().Before(cutoff) {
-				continue
-			}
-			count++
 		}
 	}
 	return count
+}
+
+// piSiblingSubsessionPaths returns the top-level session files in the same
+// project directory as sessionFilepath whose session header links back to it.
+// These are subagent sessions PI stored alongside the parent instead of
+// nesting them under <parentBase>/<shortID>/run-<N>/.
+func piSiblingSubsessionPaths(sessionFilepath string) []string {
+	dir := filepath.Dir(sessionFilepath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	target := absPath(sessionFilepath)
+	var paths []string
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		fp := filepath.Join(dir, entry.Name())
+		if absPath(fp) == target {
+			continue
+		}
+		parentPath, _, ok := piSessionHeaderParent(fp)
+		if ok && absPath(parentPath) == target {
+			paths = append(paths, fp)
+		}
+	}
+	return paths
+}
+
+// piSessionHeaderParent reads the `type: "session"` header line of a PI
+// session file and returns the parent it links to via `parentSession`, plus
+// that parent's session ID. Not every session has one — only subagent
+// sessions stored in the sibling layout (see piSubsessionPaths).
+func piSessionHeaderParent(fp string) (parentPath, parentID string, ok bool) {
+	f, err := os.Open(fp)
+	if err != nil {
+		return "", "", false
+	}
+	defer f.Close()
+
+	scanner := newJSONLScanner(f)
+	if !scanner.Scan() {
+		return "", "", false
+	}
+	var hdr struct {
+		Type          string `json:"type"`
+		ParentSession string `json:"parentSession"`
+	}
+	if err := json.Unmarshal(scanner.Bytes(), &hdr); err != nil {
+		return "", "", false
+	}
+	if hdr.Type != "session" || hdr.ParentSession == "" {
+		return "", "", false
+	}
+	if info, err := os.Stat(hdr.ParentSession); err != nil || info.IsDir() {
+		return "", "", false
+	}
+	sessionID := piSessionIDFromPath(hdr.ParentSession)
+	if sessionID == "" {
+		return "", "", false
+	}
+	return hdr.ParentSession, sessionID, true
+}
+
+// piResolveParent returns the parent session of fp, checking the nested
+// run-directory layout first and the session-header link second.
+func piResolveParent(fp string) (parentPath, parentID string, ok bool) {
+	if parentPath, parentID, ok := piParentSessionInfo(fp); ok {
+		return parentPath, parentID, true
+	}
+	return piSessionHeaderParent(fp)
+}
+
+// absPath returns the absolute form of p, falling back to p when the working
+// directory cannot be resolved. Used to compare session paths for identity.
+func absPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }
 
 func piParentSessionInfo(fp string) (parentPath, parentID string, ok bool) {
@@ -425,8 +529,16 @@ func piDetail(input string, days int) error {
 	fmt.Printf("Messages: %d\n", len(data.Steps))
 	fmt.Printf("Model:    %s\n\n", data.DominantModel)
 
-	globalPrices := piGlobalModelPrices()
 	byModel := groupStepsByModel(data.Steps)
+
+	// groupStepsByModel keeps only tokens, not the per-message logged cost
+	// (compute.StepData has no Cost field), so the unpriced report below
+	// needs its own pass over the untouched piSessionStep list to know how
+	// much money a model with no resolvable price was actually billed.
+	loggedByModel := make(map[string]float64, len(byModel))
+	for _, st := range data.Steps {
+		loggedByModel[st.Model] += st.Cost
+	}
 
 	models := make([]string, 0, len(byModel))
 	for model := range byModel {
@@ -435,13 +547,25 @@ func piDetail(input string, days int) error {
 	sort.Strings(models)
 
 	var totalActual, totalIdeal float64
-	for i, model := range models {
-		prices := globalPrices[model]
+	var unpriced []unpricedModel
+	printedAny := false
+	for _, model := range models {
 		steps := byModel[model]
 
-		if i > 0 {
+		prices, ok := resolveAgentPrices("pi", model)
+		if !ok {
+			var tokens int
+			for _, s := range steps {
+				tokens += s.Input + s.CacheCreation + s.CacheRead + s.Output
+			}
+			unpriced = append(unpriced, unpricedModel{Agent: "PI", Model: model, Tokens: tokens, Steps: len(steps), LoggedCost: loggedByModel[model]})
+			continue
+		}
+
+		if printedAny {
 			fmt.Println()
 		}
+		printedAny = true
 		fmt.Printf("=== %s (%d messages) ===\n\n", model, len(steps))
 
 		if !prices.SupportsCacheCreation {
@@ -472,6 +596,8 @@ func piDetail(input string, days int) error {
 	fmt.Printf("Ideal paid:   $%.2f\n", totalIdeal)
 	fmt.Printf("Overpay:      $%.2f (%.1f%% of ideal)\n", totalOverpay, pctIdeal)
 
+	printUnpricedModels(unpriced)
+
 	return nil
 }
 
@@ -488,7 +614,7 @@ func piList(days int, date string) error {
 	var totalActual, totalIdeal float64
 	var totalIn, totalCR, totalOut int
 
-	globalPrices := piGlobalModelPrices()
+	unpricedByModel := map[string]*unpricedModel{}
 	for _, sess := range sessions {
 		data := sess.Data
 		if data == nil || len(data.Steps) == 0 {
@@ -497,9 +623,29 @@ func piList(days int, date string) error {
 
 		byModel := groupStepsByModel(data.Steps)
 
+		// See piDetail for why this needs its own pass: groupStepsByModel
+		// only keeps compute.StepData, which has no Cost field.
+		loggedByModel := make(map[string]float64, len(byModel))
+		for _, st := range data.Steps {
+			loggedByModel[st.Model] += st.Cost
+		}
+
 		var s compute.Summary
 		for model, steps := range byModel {
-			prices := globalPrices[model]
+			prices, ok := resolveAgentPrices("pi", model)
+			if !ok {
+				u := unpricedByModel[model]
+				if u == nil {
+					u = &unpricedModel{Agent: "PI", Model: model}
+					unpricedByModel[model] = u
+				}
+				for _, st := range steps {
+					u.Tokens += st.Input + st.CacheCreation + st.CacheRead + st.Output
+				}
+				u.Steps += len(steps)
+				u.LoggedCost += loggedByModel[model]
+				continue
+			}
 			if !prices.SupportsCacheCreation {
 				rows := compute.ComputeIdeal(steps)
 				part := compute.Summarize(rows, prices)
@@ -554,6 +700,13 @@ func piList(days int, date string) error {
 
 	fmt.Printf("%19s  %-36s  %-18s  %4s  %7s  %6.2f  %6.2f  %8.2f  %6.1f%%  %7.2f  %7.2f\n",
 		"TOTAL", "", "", "", formatTokens(totalTokens), totalActual, totalIdeal, totalOverpay, pct, totalCostPer1M, totalIdealPer1M)
+
+	unpriced := make([]unpricedModel, 0, len(unpricedByModel))
+	for _, u := range unpricedByModel {
+		unpriced = append(unpriced, *u)
+	}
+	sort.Slice(unpriced, func(i, j int) bool { return unpriced[i].Model < unpriced[j].Model })
+	printUnpricedModels(unpriced)
 
 	return nil
 }

@@ -6,7 +6,7 @@ import "context"
 func (s *Store) GetMessages(ctx context.Context, agent, sessionID string) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, agent, session_id, msg_index, role, content, model, provider,
-		       input_tokens, output_tokens, cache_read, cache_write, cost,
+		       input_tokens, output_tokens, cache_read, cache_write, cache_write_1h, cost,
 		       stop_reason, thinking, response, tool_call_id, created_at
 		FROM message
 		WHERE agent = ? AND session_id = ?
@@ -20,7 +20,7 @@ func (s *Store) GetMessages(ctx context.Context, agent, sessionID string) ([]Mes
 	for rows.Next() {
 		var m Message
 		if err := rows.Scan(&m.ID, &m.Agent, &m.SessionID, &m.MsgIndex, &m.Role, &m.Content,
-			&m.Model, &m.Provider, &m.InputTokens, &m.OutputTokens, &m.CacheRead, &m.CacheWrite,
+			&m.Model, &m.Provider, &m.InputTokens, &m.OutputTokens, &m.CacheRead, &m.CacheWrite, &m.CacheWrite1h,
 			&m.Cost, &m.StopReason, &m.Thinking, &m.Response, &m.ToolCallID, &m.CreatedAt); err != nil {
 			return nil, err
 		}
