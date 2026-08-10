@@ -80,21 +80,28 @@ func main() {
 	}
 	webCmd.Flags().StringVarP(&webPort, "port", "p", "8080", "HTTP port")
 
-	// sync — read all agent sources and write to the local store
+	// sync — read all agent sources and write to the local store.
+	// Only sessions whose source changed since the last run are re-parsed;
+	// --force re-parses everything.
+	var syncForce bool
 	syncCmd := &cobra.Command{
 		Use:   "sync",
-		Short: "Ingest sessions from all agents into the local store",
+		Short: "Ingest new/changed sessions from all agents into the local store",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSync(false)
+			return runSync(false, syncForce)
 		},
 	}
+	syncCmd.Flags().BoolVar(&syncForce, "force", false, "re-parse every session, even unchanged ones")
+
+	var syncWatchForce bool
 	syncWatchCmd := &cobra.Command{
 		Use:   "watch",
 		Short: "Ingest once, then watch agent sources for changes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSync(true)
+			return runSync(true, syncWatchForce)
 		},
 	}
+	syncWatchCmd.Flags().BoolVar(&syncWatchForce, "force", false, "re-parse every session on the initial pass")
 
 	rootCmd.AddCommand(ocCmd, piCmd, claudeCmd, totalCmd, webCmd, syncCmd, syncWatchCmd)
 

@@ -2,12 +2,12 @@ package ingest
 
 import (
 	"context"
+	"github.com/fsnotify/fsnotify"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
-	"github.com/fsnotify/fsnotify"
 	"tokeneks/store"
 )
 
@@ -150,23 +150,44 @@ func TestWatcher_EmptySession_StoredButNoEvent(t *testing.T) {
 	}
 }
 
-func TestWatcher_InitialSync_ReingestsExistingSession(t *testing.T) {
-	st := openStore(t)
-	dir := t.TempDir()
-	fp := filepath.Join(dir, "s1.jsonl")
-	if err := os.WriteFile(fp, []byte("{}"), 0o644); err != nil {
+// The store is a cache: a session whose source has not changed since the
+// last run must not be re-parsed on startup. Re-parsing every session is
+// what made startup take ~25s over a few hundred MB of JSONL.
+func TestWatcher_InitialSync_SkipsUnchangedSession(t *testing.T) {
+	st, dir, _ := seedStoredSession(t, "stale-marker-matches")
+
+	var parseCount int32
+	w := NewWatcher(st, map[string]Source{"claude": &fileSource{agent: "claude", root: dir}}, map[string]Parser{
+		"claude": func(ctx context.Context, ref SessionRef) (store.ParsedSession, error) {
+			atomic.AddInt32(&parseCount, 1)
+			return echoParser("fresh")(ctx, ref)
+		},
+	}, WatcherConfig{Debounce: 20 * time.Millisecond})
+	defer w.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+
+	if events := collectEvents(w.Events(), 1, 500*time.Millisecond); len(events) != 0 {
+		t.Fatalf("initial events = %d, want 0 (nothing changed)", len(events))
+	}
+	if n := atomic.LoadInt32(&parseCount); n != 0 {
+		t.Fatalf("parseCount = %d, want 0 (unchanged source must not be re-parsed)", n)
+	}
+}
+
+func TestWatcher_InitialSync_ReingestsChangedSession(t *testing.T) {
+	st, dir, fp := seedStoredSession(t, "stale-marker-matches")
+
+	// Move the file's mtime forward so its marker no longer matches what's
+	// stored. Chtimes rather than a rewrite: a rewrite can land in the same
+	// millisecond fileSource rounds to, which would make this flaky.
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(fp, future, future); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(fp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.IngestSession(context.Background(), store.ParsedSession{
-		Session: store.Session{Agent: "claude", SessionID: "s1", CreatedAt: 1, LastActivity: 2, SourceMTime: info.ModTime().UnixMilli()},
-		Messages: []store.ParsedMessage{{Message: store.Message{Agent: "claude", SessionID: "s1", MsgIndex: 0, Role: store.RoleUser, Content: "stale", CreatedAt: 1}}},
-	}); err != nil {
-		t.Fatal(err)
-	}
+
 	var parseCount int32
 	w := NewWatcher(st, map[string]Source{"claude": &fileSource{agent: "claude", root: dir}}, map[string]Parser{
 		"claude": func(ctx context.Context, ref SessionRef) (store.ParsedSession, error) {
@@ -192,6 +213,30 @@ func TestWatcher_InitialSync_ReingestsExistingSession(t *testing.T) {
 	if len(messages) != 1 || messages[0].Content != "fresh" {
 		t.Fatalf("messages = %+v, want fresh message", messages)
 	}
+}
+
+// seedStoredSession writes dir/s1.jsonl and stores a matching session row
+// whose source_mtime is the marker fileSource will compute for that file
+// — i.e. the state after a previous run ingested it.
+func seedStoredSession(t *testing.T, content string) (st *store.Store, dir, path string) {
+	t.Helper()
+	st = openStore(t)
+	dir = t.TempDir()
+	path = filepath.Join(dir, "s1.jsonl")
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.IngestSession(context.Background(), store.ParsedSession{
+		Session:  store.Session{Agent: "claude", SessionID: "s1", CreatedAt: 1, LastActivity: 2, SourceMTime: info.ModTime().UnixMilli()},
+		Messages: []store.ParsedMessage{{Message: store.Message{Agent: "claude", SessionID: "s1", MsgIndex: 0, Role: store.RoleUser, Content: content, CreatedAt: 1}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return st, dir, path
 }
 
 func TestWatcher_FileChange_Reingests(t *testing.T) {
@@ -337,9 +382,9 @@ func TestWatcher_Debounce_CoalescesEvents(t *testing.T) {
 
 func TestResolveSessionID(t *testing.T) {
 	cases := []struct {
-		path     string
-		wantAgt  string
-		wantID   string
+		path    string
+		wantAgt string
+		wantID  string
 	}{
 		{"/x/sess-abc.jsonl", "claude", "sess-abc"},
 		// pi main session: actual filename format is

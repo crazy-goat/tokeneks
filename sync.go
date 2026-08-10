@@ -16,7 +16,7 @@ const defaultTokeneksDB = "~/.local/share/tokeneks/tokeneks.db"
 
 // runSync performs a full ingest and (optionally) starts a watcher that
 // re-ingests sessions on file change.
-func runSync(watch bool) error {
+func runSync(watch, force bool) error {
 	st, err := openTokeneksStore()
 	if err != nil {
 		return err
@@ -39,12 +39,13 @@ func runSync(watch bool) error {
 	}
 
 	ing := &ingest.Ingestor{
-		Store:       st,
-		Agents:      []string{"claude", "pi", "opencode"},
-		SourceFor:   sources,
-		ParserFor:   parsers,
-		Log:         log.New(os.Stderr, "[sync] ", log.LstdFlags),
-		OnProgress:  progress,
+		Store:      st,
+		Agents:     []string{"claude", "pi", "opencode"},
+		SourceFor:  sources,
+		ParserFor:  parsers,
+		Log:        log.New(os.Stderr, "[sync] ", log.LstdFlags),
+		OnProgress: progress,
+		Force:      force,
 	}
 	res, err := ing.Sync(context.Background())
 	if err != nil {

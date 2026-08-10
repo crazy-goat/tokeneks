@@ -142,7 +142,10 @@ func (w *Watcher) Run(ctx context.Context) error {
 		}
 	}
 
-	// initial sync
+	// Initial sync. Only sessions whose source changed since the last
+	// run are re-parsed — the store is the cache. Watches are already
+	// installed above, so anything that changes from here on arrives
+	// through fsnotify.
 	start := time.Now()
 	for agent, src := range w.ingestor.SourceFor {
 		refs, err := src.Discover(ctx)
@@ -150,9 +153,15 @@ func (w *Watcher) Run(ctx context.Context) error {
 			w.log.Printf("initial discover %s: %v", agent, err)
 			continue
 		}
+		total := len(refs)
+		refs, err = w.filterChangedRefs(ctx, agent, refs)
+		if err != nil {
+			w.log.Printf("initial filter %s: %v", agent, err)
+		}
 		for _, ref := range refs {
 			w.reingest(ctx, ref)
 		}
+		w.log.Printf("initial sync %s: %d/%d changed", agent, len(refs), total)
 	}
 	w.log.Printf("initial sync done in %s", time.Since(start))
 
@@ -179,31 +188,11 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 }
 
-// filterChangedRefs drops refs whose per-session change marker is at or
-// below what's already in the store. One batch query per agent (not N
-// per-session queries). MTime sources per agent:
-//   - opencode: MAX(part.id) WHERE type='step-finish' — monotonic,
-//     never bumps on unrelated touches
-//   - claude, pi: timestamp of the last JSONL entry in the file —
-//     stable for append-only logs
-// Sessions not in the store yet are always ingested. Returns refs as-is
-// on lookup failure (fail open: re-ingest everything).
+// filterChangedRefs is Ingestor.FilterChangedRefs — the watcher and a
+// one-shot Sync must use the same skip rule, or one would re-ingest
+// what the other just marked as unchanged.
 func (w *Watcher) filterChangedRefs(ctx context.Context, agent string, refs []SessionRef) ([]SessionRef, error) {
-	if len(refs) == 0 {
-		return refs, nil
-	}
-	stored, err := w.store.GetSessionMTimes(ctx, agent)
-	if err != nil {
-		return refs, err
-	}
-	changed := refs[:0:0] // new slice, no aliasing
-	for _, ref := range refs {
-		existing, ok := stored[ref.SessionID]
-		if !ok || existing != ref.MTime {
-			changed = append(changed, ref)
-		}
-	}
-	return changed, nil
+	return w.ingestor.FilterChangedRefs(ctx, agent, refs)
 }
 
 func (w *Watcher) addRecursive(root string) error {
@@ -274,7 +263,12 @@ func (w *Watcher) processChange(ctx context.Context, path string, kind ChangeKin
 		w.emit(SessionEvent{Agent: agent, SessionID: sessionID, Source: path, Kind: Removed, Time: time.Now()})
 		return
 	}
-	ref := SessionRef{Agent: agent, SessionID: sessionID, Source: path, MTime: nowMs()}
+	// Same marker the sources compute during Discover — a wall-clock
+	// stamp here would never match on the next start and would make
+	// every file touched during this run look changed again.
+	// Computed before parsing, so a write landing mid-parse only costs
+	// one redundant re-ingest later; it can never hide a change.
+	ref := SessionRef{Agent: agent, SessionID: sessionID, Source: path, MTime: jsonlMarker(path, nil)}
 	w.reingestRef(ctx, ref)
 }
 

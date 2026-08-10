@@ -52,23 +52,25 @@ type SyncResult struct {
 
 // Ingestor coordinates sources, parsers and the store.
 type Ingestor struct {
-	Store       *store.Store
-	Agents      []string
-	SourceFor   map[string]Source
-	ParserFor   map[string]Parser
-	Log         *log.Logger
-	OnError     func(ref SessionRef, err error)
-	OnProgress  func(agent string, current, total int)
+	Store      *store.Store
+	Agents     []string
+	SourceFor  map[string]Source
+	ParserFor  map[string]Parser
+	Log        *log.Logger
+	OnError    func(ref SessionRef, err error)
+	OnProgress func(agent string, current, total int)
+	// Force re-parses every discovered session even if its change
+	// marker matches the store. Off by default: the store is the cache,
+	// and re-reading hundreds of MB of JSONL on every start is the
+	// single most expensive thing this tool does.
+	Force bool
 }
 
-// Sync runs a full sync: discover all sessions and ingest them.
-// Every discovered session is re-parsed and re-ingested unconditionally
-// — we do not skip by source_mtime because filesystem mtimes for the
-// JSONL sources are not a reliable signal (append-only writes and
-// atomic-replace patterns can leave mtime stale, and any skip path
-// risks missing changes). IngestSession's DELETE+INSERT is cheap
-// enough that an unconditional re-ingest is faster than N round-trips
-// to the store to check mtimes per session.
+// Sync discovers all sessions and ingests the ones whose source changed
+// since the last run (see FilterChangedRefs). Sessions already in the
+// store with an unchanged marker are counted as Skipped and never
+// re-parsed — that is what makes the sqlite store an actual cache
+// rather than a write-through mirror. Set Force to re-ingest everything.
 func (i *Ingestor) Sync(ctx context.Context) (SyncResult, error) {
 	var res SyncResult
 	for _, agent := range i.Agents {
@@ -87,6 +89,14 @@ func (i *Ingestor) Sync(ctx context.Context) (SyncResult, error) {
 			continue
 		}
 		res.Discovered += len(refs)
+		if !i.Force {
+			changed, err := i.FilterChangedRefs(ctx, agent, refs)
+			if err != nil {
+				i.reportErr(SessionRef{Agent: agent}, fmt.Errorf("mtime filter: %w", err))
+			}
+			res.Skipped += len(refs) - len(changed)
+			refs = changed
+		}
 		for idx, ref := range refs {
 			ps, err := parser(ctx, ref)
 			if err != nil {
@@ -117,6 +127,33 @@ func (i *Ingestor) Sync(ctx context.Context) (SyncResult, error) {
 		}
 	}
 	return res, nil
+}
+
+// FilterChangedRefs drops refs whose per-session change marker equals
+// what's already in the store. One batch query per agent (not N
+// per-session queries). Marker sources per agent:
+//   - opencode: hash of MAX(part.id) WHERE type='step-finish' — only
+//     changes when a new step-finish part is actually inserted
+//   - claude, pi: hash of (file size, file mtime) — see jsonlMarker
+//
+// Sessions not in the store yet are always ingested. Returns refs as-is
+// on lookup failure (fail open: re-ingest everything).
+func (i *Ingestor) FilterChangedRefs(ctx context.Context, agent string, refs []SessionRef) ([]SessionRef, error) {
+	if len(refs) == 0 {
+		return refs, nil
+	}
+	stored, err := i.Store.GetSessionMTimes(ctx, agent)
+	if err != nil {
+		return refs, err
+	}
+	changed := refs[:0:0] // new slice, no aliasing
+	for _, ref := range refs {
+		existing, ok := stored[ref.SessionID]
+		if !ok || existing != ref.MTime {
+			changed = append(changed, ref)
+		}
+	}
+	return changed, nil
 }
 
 func (i *Ingestor) reportErr(ref SessionRef, err error) {

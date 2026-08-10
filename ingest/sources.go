@@ -1,10 +1,8 @@
 package ingest
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"os"
@@ -46,16 +44,11 @@ func (s *claudeSource) Discover(ctx context.Context) ([]SessionRef, error) {
 			return nil
 		}
 		sessionID := strings.TrimSuffix(d.Name(), ".jsonl")
-		// Per-file mtime is unreliable for JSONL append-only files
-		// (claude's atomic-replace pattern can leave mtime stale), so
-		// we use the timestamp of the last message in the file. Reading
-		// only the tail (~4KB) keeps this O(1) regardless of file size.
-		ts, _ := lastJSONLMessageTime(path)
 		refs = append(refs, SessionRef{
 			Agent:     "claude",
 			SessionID: sessionID,
 			Source:    path,
-			MTime:     ts,
+			MTime:     jsonlMarker(path, d),
 		})
 		return nil
 	})
@@ -140,8 +133,8 @@ func (s *opencodeSource) Discover(ctx context.Context) ([]SessionRef, error) {
 //
 // We mask the sign bit because FNV-1a returns uint64 and roughly half
 // the values have the high bit set, which would become negative as
-// int64 and break the `existing < ref.MTime` comparison in the skip
-// filter (negative values would be treated as "smaller" than zero).
+// int64 — harmless for the skip filter's equality check, but it would
+// store nonsense-looking negatives in source_mtime.
 func hashID(s string) int64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(s))
@@ -198,15 +191,11 @@ func (s *piSource) Discover(ctx context.Context) ([]SessionRef, error) {
 		} else {
 			return nil
 		}
-		// Per-file mtime is unreliable for JSONL — use the timestamp of
-		// the last message in the file instead. Same approach as
-		// claudeSource.
-		ts, _ := lastJSONLMessageTime(path)
 		refs = append(refs, SessionRef{
 			Agent:     "pi",
 			SessionID: id,
 			Source:    path,
-			MTime:     ts,
+			MTime:     jsonlMarker(path, d),
 		})
 		return nil
 	})
@@ -239,59 +228,35 @@ func dbFileMTime(path string) int64 {
 	return t
 }
 
-// lastJSONLMessageTime returns the timestamp of the last entry in a
-// JSONL file, parsed as RFC3339 (with nanosecond fallback), or 0 on
-// any error or empty file. The file is assumed to have one JSON object
-// per line; we read only the tail (a few KB) so the cost is constant
-// regardless of file size. Used as a per-file change signal that is
-// more reliable than os.Stat mtime for append-only agent session logs.
-func lastJSONLMessageTime(path string) (int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil || info.Size() == 0 {
-		return 0, err
-	}
-	const tailSize = 4096
-	off := int64(0)
-	if info.Size() > tailSize {
-		off = info.Size() - tailSize
-	}
-	buf := make([]byte, info.Size()-off)
-	if _, err := f.ReadAt(buf, off); err != nil {
-		return 0, err
-	}
-	if off > 0 {
-		if i := bytes.IndexByte(buf, '\n'); i >= 0 {
-			buf = buf[i+1:]
-		}
-	}
-	buf = bytes.TrimSpace(buf)
-	var lastLine []byte
-	if i := bytes.LastIndexByte(buf, '\n'); i >= 0 {
-		lastLine = buf[i+1:]
+// jsonlMarker returns a per-file change marker for an append-only JSONL
+// session log: an FNV-1a hash of (size, mtime-in-ns). The skip filter
+// compares markers for inequality, so the value only has to change when
+// the file does — it does not have to be monotonic.
+//
+// We hash size together with mtime rather than using either alone:
+// a stale mtime (atomic-replace writers) is still caught by the size
+// change, and a same-size rewrite is caught by mtime. The previous
+// approach — the timestamp of the last JSONL entry — silently returned 0
+// for ~half of the real files here (claude's trailing summary lines and
+// pi entries carry no "timestamp" field), which made every such session
+// look unchanged-at-zero and, worse, indistinguishable from each other.
+//
+// The DirEntry is optional; pass nil to stat the path directly. Using
+// the entry from the WalkDir that found the file avoids a second stat.
+func jsonlMarker(path string, d os.DirEntry) int64 {
+	var info os.FileInfo
+	var err error
+	if d != nil {
+		info, err = d.Info()
 	} else {
-		lastLine = buf
+		info, err = os.Stat(path)
 	}
-	lastLine = bytes.TrimSpace(lastLine)
-	if len(lastLine) == 0 || lastLine[0] != '{' {
-		return 0, nil
+	if err != nil {
+		// Fail open: an unreadable marker must never compare equal to
+		// whatever is stored, or the session would be skipped forever.
+		return hashID(fmt.Sprintf("stat-error:%d", time.Now().UnixNano()))
 	}
-	var entry struct {
-		Timestamp string `json:"timestamp"`
-	}
-	if err := json.Unmarshal(lastLine, &entry); err != nil || entry.Timestamp == "" {
-		return 0, nil
-	}
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02 15:04"} {
-		if t, err := time.Parse(layout, entry.Timestamp); err == nil {
-			return t.UnixMilli(), nil
-		}
-	}
-	return 0, nil
+	return hashID(fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano()))
 }
 
 // openSQLiteRO opens a sqlite database in read-only mode.

@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
-	"time"
 	"tokeneks/store"
 )
 
@@ -29,8 +28,8 @@ func TestClaudeSource_DiscoversSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	files := map[string]string{
-		"sess-a.jsonl": "x",
-		"sess-b.jsonl": "y",
+		"sess-a.jsonl":        "x",
+		"sess-b.jsonl":        "y",
 		"subagents/foo.jsonl": "z", // also picked up — separate session
 	}
 	for rel, content := range files {
@@ -61,20 +60,35 @@ func TestClaudeSource_DiscoversSessions(t *testing.T) {
 	}
 }
 
-func TestLastJSONLMessageTime_TrailingNewline(t *testing.T) {
+func TestJSONLMarker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
-	content := "{\"timestamp\":\"2026-08-03T12:00:00.000Z\"}\n{\"timestamp\":\"2026-08-03T12:01:02.345Z\"}\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	// A line with no "timestamp" field: the old marker returned 0 for
+	// these, which made unrelated sessions compare equal.
+	if err := os.WriteFile(path, []byte("{\"type\":\"summary\"}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	got, err := lastJSONLMessageTime(path)
-	if err != nil {
-		t.Fatalf("lastJSONLMessageTime() = %v", err)
+	first := jsonlMarker(path, nil)
+	if first == 0 {
+		t.Fatal("jsonlMarker() = 0 for an existing file")
 	}
-	want := time.Date(2026, 8, 3, 12, 1, 2, 345000000, time.UTC).UnixMilli()
-	if got != want {
-		t.Fatalf("lastJSONLMessageTime() = %d, want %d", got, want)
+	if again := jsonlMarker(path, nil); again != first {
+		t.Fatalf("jsonlMarker() unstable for an unchanged file: %d then %d", first, again)
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{\"type\":\"summary\"}\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if grown := jsonlMarker(path, nil); grown == first {
+		t.Fatalf("jsonlMarker() unchanged after append: %d", grown)
+	}
+
+	if missing := jsonlMarker(filepath.Join(t.TempDir(), "gone.jsonl"), nil); missing == 0 {
+		t.Fatal("jsonlMarker() = 0 for a missing file; must not compare equal to a stored 0")
 	}
 }
 
@@ -158,8 +172,8 @@ func TestIngestor_Sync_CallsParserForEachRef(t *testing.T) {
 	}
 
 	ing := &Ingestor{
-		Store:  st,
-		Agents: []string{"test"},
+		Store:     st,
+		Agents:    []string{"test"},
 		SourceFor: map[string]Source{"test": src},
 		ParserFor: map[string]Parser{"test": parser},
 	}
@@ -178,14 +192,68 @@ func TestIngestor_Sync_CallsParserForEachRef(t *testing.T) {
 		t.Errorf("storedCount=%d, want 2", storedCount)
 	}
 
-	// Run again — should upsert, not duplicate.
+	// Run again — nothing changed, so both sessions are skipped and the
+	// parser is not called again. This is the point of the store: it is a
+	// cache, not a mirror that gets rebuilt from source on every run.
 	res, _ = ing.Sync(context.Background())
-	if res.Ingested != 2 {
-		t.Errorf("re-sync Ingested=%d, want 2 (should be idempotent)", res.Ingested)
+	if res.Ingested != 0 || res.Skipped != 2 {
+		t.Errorf("re-sync res=%+v, want Ingested=0 Skipped=2", res)
+	}
+	if parseCalls != 2 {
+		t.Errorf("parseCalls=%d after re-sync, want 2 (unchanged refs must not be re-parsed)", parseCalls)
 	}
 	storedCount, _ = st.CountSessions(context.Background(), "test")
 	if storedCount != 2 {
 		t.Errorf("after re-sync storedCount=%d, want 2", storedCount)
+	}
+
+	// Force ignores the skip filter.
+	ing.Force = true
+	res, _ = ing.Sync(context.Background())
+	if res.Ingested != 2 || res.Skipped != 0 {
+		t.Errorf("forced re-sync res=%+v, want Ingested=2 Skipped=0", res)
+	}
+	storedCount, _ = st.CountSessions(context.Background(), "test")
+	if storedCount != 2 {
+		t.Errorf("after forced re-sync storedCount=%d, want 2", storedCount)
+	}
+}
+
+func TestIngestor_Sync_ReingestsChangedRef(t *testing.T) {
+	st := openStore(t)
+	src := &mockSource{
+		agent: "test",
+		refs:  []SessionRef{{Agent: "test", SessionID: "s1", Source: "/p1", MTime: 100}},
+	}
+	parseCalls := 0
+	ing := &Ingestor{
+		Store:     st,
+		Agents:    []string{"test"},
+		SourceFor: map[string]Source{"test": src},
+		ParserFor: map[string]Parser{"test": func(ctx context.Context, ref SessionRef) (store.ParsedSession, error) {
+			parseCalls++
+			return store.ParsedSession{
+				Session: store.Session{Agent: "test", SessionID: ref.SessionID, CreatedAt: 1, LastActivity: 2},
+				Messages: []store.ParsedMessage{
+					{Message: store.Message{Agent: "test", SessionID: ref.SessionID, MsgIndex: 0, Role: store.RoleUser, Content: "hi", CreatedAt: 1}},
+				},
+			}, nil
+		}},
+	}
+	if _, err := ing.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	src.refs[0].MTime = 200 // source changed since the last run
+	res, err := ing.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if res.Ingested != 1 || res.Skipped != 0 {
+		t.Errorf("res=%+v, want Ingested=1 Skipped=0", res)
+	}
+	if parseCalls != 2 {
+		t.Errorf("parseCalls=%d, want 2", parseCalls)
 	}
 }
 
