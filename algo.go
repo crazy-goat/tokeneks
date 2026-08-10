@@ -220,10 +220,11 @@ const (
 // reconcile the same way once it carries a per-row logged cost worth
 // comparing against; this task only wires it into oc detail.
 type detailCostRecon struct {
-	RatedTotal  float64 // sum of each priced row's own rate-derived cost
-	LoggedTotal float64 // same rows, but using each row's logged cost where one exists (its rate cost otherwise) — exactly what a logged-preferring headline sums
-	CoveredRows int     // priced rows that actually carry a logged cost — the only rows the delta can come from
-	PricedRows  int     // priced rows total (the covered-rows denominator, i.e. the covered fraction)
+	RatedTotal        float64 // sum of every priced row's own rate-derived cost — the whole-session rate-derived picture
+	CoveredRatedTotal float64 // rate-derived cost of just the rows that also carry a logged cost — the only rows Delta can come from, and PctDelta's denominator
+	LoggedTotal       float64 // same rows as RatedTotal, but using each row's logged cost where one exists (its rate cost otherwise) — exactly what a logged-preferring headline sums
+	CoveredRows       int     // priced rows that actually carry a logged cost — the only rows the delta can come from
+	PricedRows        int     // priced rows total (the covered-rows denominator, i.e. the covered fraction)
 }
 
 // Delta is how much more (or less) the logged provider total is than the
@@ -231,22 +232,30 @@ type detailCostRecon struct {
 // tokeneks' price table would have.
 func (r detailCostRecon) Delta() float64 { return r.LoggedTotal - r.RatedTotal }
 
-// PctDelta is Delta as a percentage of RatedTotal, 0 when RatedTotal is 0
+// PctDelta is Delta as a percentage of CoveredRatedTotal — not the
+// whole-session RatedTotal. Delta only ever originates from the rows that
+// carry a logged cost (uncovered rows contribute the same value to both
+// totals and cancel out), so dividing by the full RatedTotal would dilute
+// the percentage with rows that had no chance to contribute to the
+// numerator: a session where only a fifth of the priced rows are covered
+// would report a drift that looks a fifth as bad as it really is on the
+// rows it's actually measuring. Returns 0 when CoveredRatedTotal is 0
 // rather than the NaN/Inf a naive division would produce.
 func (r detailCostRecon) PctDelta() float64 {
-	if r.RatedTotal == 0 {
+	if r.CoveredRatedTotal == 0 {
 		return 0
 	}
-	return r.Delta() / r.RatedTotal * 100
+	return r.Delta() / r.CoveredRatedTotal * 100
 }
 
 // Significant reports whether the drift is worth printing at all. A session
 // where nothing was logged has nothing to reconcile (CoveredRows == 0), and
 // a drift smaller than detailReconMinAbsDelta/detailReconMinPctDelta is more
-// likely float rounding than a real price-table gap. RatedTotal == 0 (a
-// resolved rate that happens to price at exactly $0) skips the percentage
-// check entirely rather than let PctDelta's safe zero fallback hide a real
-// logged cost sitting on top of it.
+// likely float rounding than a real price-table gap. CoveredRatedTotal == 0
+// (every covered row happens to rate-price at exactly $0) skips the
+// percentage check entirely rather than let PctDelta's safe zero fallback
+// hide a real logged cost sitting on top of it — CoveredRows > 0 at that
+// point guarantees the delta is real, just not expressible as a percentage.
 func (r detailCostRecon) Significant() bool {
 	if r.CoveredRows == 0 {
 		return false
@@ -255,21 +264,23 @@ func (r detailCostRecon) Significant() bool {
 	if delta < detailReconMinAbsDelta {
 		return false
 	}
-	if r.RatedTotal == 0 {
+	if r.CoveredRatedTotal == 0 {
 		return true
 	}
 	return math.Abs(r.PctDelta()) >= detailReconMinPctDelta
 }
 
 // computeDetailCostRecon walks the same rows/pricing printDetailRows prices,
-// summing two totals instead of one: RatedTotal prices every row strictly
-// from its own resolved rate, and LoggedTotal prices the same rows
-// preferring each row's own logged cost — the same preference
-// ocSessionSummary's headline applies. Rows with no resolvable rate at all
-// are excluded from both, mirroring ocSessionSummary's own unpriced-row
-// exclusion (unpriced rows never reach its summary.Actual either), so
-// LoggedTotal here lines up with the headline's Actual figure exactly
-// rather than by coincidence.
+// summing three totals: RatedTotal prices every row strictly from its own
+// resolved rate; LoggedTotal prices the same rows preferring each row's own
+// logged cost — the same preference ocSessionSummary's headline applies;
+// and CoveredRatedTotal is the same rate-derived figure as RatedTotal but
+// restricted to the rows that actually contributed a logged cost, since
+// those are the only rows PctDelta's numerator can come from. Rows with no
+// resolvable rate at all are excluded from all three, mirroring
+// ocSessionSummary's own unpriced-row exclusion (unpriced rows never reach
+// its summary.Actual either), so LoggedTotal here lines up with the
+// headline's Actual figure exactly rather than by coincidence.
 func computeDetailCostRecon(rows []compute.IdealRow, pricing []detailRowPrice) detailCostRecon {
 	var r detailCostRecon
 	for i, row := range rows {
@@ -291,6 +302,7 @@ func computeDetailCostRecon(rows []compute.IdealRow, pricing []detailRowPrice) d
 
 		if p.LoggedCost > 0 {
 			r.CoveredRows++
+			r.CoveredRatedTotal += rated
 			r.LoggedTotal += p.LoggedCost
 		} else {
 			r.LoggedTotal += rated
@@ -307,6 +319,14 @@ func computeDetailCostRecon(rows []compute.IdealRow, pricing []detailRowPrice) d
 // the rate table within rounding, prints nothing at all, same convention as
 // printDetailRowFootnotes above.
 //
+// The first line gives the whole-session picture (every priced row's
+// RatedTotal vs. LoggedTotal and their Delta); the second line names the
+// coverage fraction and the percentage, and is explicit that the percentage
+// is measured against CoveredRatedTotal — the rate-derived cost of just the
+// covered rows — not the whole-session RatedTotal printed above it, since
+// those are two different numbers and only one of them is PctDelta's
+// denominator.
+//
 // This is not an error report: the rate table and the provider's bill
 // measure two different things (tokeneks' own price table vs. what the
 // provider actually billed for the same tokens), and this block exists to
@@ -317,10 +337,10 @@ func printDetailCostReconciliation(r detailCostRecon) {
 		return
 	}
 	fmt.Println()
-	fmt.Printf("Price-table drift: rate-derived $%.4f vs. logged $%.4f (%+.4f, %+.1f%% of rate-derived)\n",
-		r.RatedTotal, r.LoggedTotal, r.Delta(), r.PctDelta())
-	fmt.Printf("  %d/%d priced rows carried a logged cost; this is measured drift between tokeneks' price table and the provider's actual bill, not an error in either.\n",
-		r.CoveredRows, r.PricedRows)
+	fmt.Printf("Price-table drift: rate-derived $%.4f vs. logged $%.4f (%+.4f)\n",
+		r.RatedTotal, r.LoggedTotal, r.Delta())
+	fmt.Printf("  %d/%d priced rows carried a logged cost, rate-derived $%.4f for just those rows; %+.1f%% of that covered total — measured drift between tokeneks' price table and the provider's actual bill, not an error in either.\n",
+		r.CoveredRows, r.PricedRows, r.CoveredRatedTotal, r.PctDelta())
 }
 
 // rowsHaveCacheCreation reports whether any row actually carries cache-write
