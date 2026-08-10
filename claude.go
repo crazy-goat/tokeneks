@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"sync"
 	"time"
 	"tokeneks/compute"
+	"tokeneks/store"
 )
 
 // defaultClaudeSessions is a var, not a const, so tests can point it at a
@@ -609,6 +612,20 @@ func cleanClaudeProjectName(dirName string) string {
 	return strings.ReplaceAll(name, "-", "/")
 }
 
+// claudeSessionNotFoundError marks a clean "no file matched" result from
+// resolveClaudeSessionPath's walk, as opposed to the walk itself failing (a
+// permissions problem, a corrupt directory, ...) — that case is returned
+// as-is by resolveClaudeSessionPath and must never be mistaken for this one.
+// claudeDetail uses errors.As to route only this case to the store fallback
+// (see claudeDetailFromStore) and let every other error propagate untouched.
+type claudeSessionNotFoundError struct {
+	id string
+}
+
+func (e *claudeSessionNotFoundError) Error() string {
+	return fmt.Sprintf("Claude session not found: %s", e.id)
+}
+
 func resolveClaudeSessionPath(input string) (string, string, error) {
 	if strings.HasSuffix(input, ".jsonl") || strings.Contains(input, "/") {
 		return input, "", nil
@@ -629,7 +646,7 @@ func resolveClaudeSessionPath(input string) (string, string, error) {
 		return "", "", err
 	}
 	if match == "" {
-		return "", "", fmt.Errorf("Claude session not found: %s", input)
+		return "", "", &claudeSessionNotFoundError{id: input}
 	}
 	return match, input, nil
 }
@@ -637,6 +654,17 @@ func resolveClaudeSessionPath(input string) (string, string, error) {
 func claudeDetail(input string) error {
 	fp, sessionID, err := resolveClaudeSessionPath(input)
 	if err != nil {
+		var notFound *claudeSessionNotFoundError
+		if errors.As(err, &notFound) {
+			// The walk completed cleanly and just found no file — the
+			// session's source JSONL may have been rotated or deleted while
+			// the session stayed in the store (a real cache since commit
+			// 2486511). Fall back to it rather than failing outright. Any
+			// other error from resolveClaudeSessionPath (a walk failure, a
+			// permissions problem) skips this branch entirely and is
+			// returned untouched below.
+			return claudeDetailFromStore(notFound.id, err)
+		}
 		return err
 	}
 
@@ -654,12 +682,6 @@ func claudeDetail(input string) error {
 		sessionID = strings.TrimSuffix(filepath.Base(fp), ".jsonl")
 	}
 
-	modelCount := make(map[string]int)
-	for _, m := range res.Models {
-		modelCount[m]++
-	}
-	primaryModel := dominantModel(modelCount)
-
 	// buildPricingSpecs()["claude"] resolves every model "now" (see its own
 	// doc comment) rather than at this session's LastActivity the way this
 	// function used to — the same rule getSessionDetailFromStore
@@ -669,8 +691,18 @@ func claudeDetail(input string) error {
 	// 2026-09-01 and the other not.
 	spec := buildPricingSpecs()["claude"]
 
-	if _, ok := spec.PriceFunc(primaryModel, 0); !ok {
-		return fmt.Errorf("no prices configured for model %s", primaryModel)
+	// One continuous ideal-cache pass over the session's untouched step
+	// order — see computeSessionPricing's doc comment (web_store.go) for why
+	// splitting by model first (the old byModel := groupStepsByModel(...)
+	// here) inflates Ideal and can produce the impossible Paid < Ideal.
+	steps := make([]sessionStep, len(res.Steps))
+	for i, st := range res.Steps {
+		steps[i] = sessionStep{Model: st.Model, Data: st.Step, CreatedAt: st.CreatedAt}
+	}
+
+	primaryModel, err := claudeDominantModelAndPriceCheck(steps, spec)
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("Session:  %s\n", sessionID)
@@ -680,29 +712,52 @@ func claudeDetail(input string) error {
 	fmt.Printf("Messages: %d\n", len(res.Steps))
 	fmt.Printf("ToolCalls: %d\n\n", res.ToolCalls)
 
-	// Same fail-fast as before this fix (bail before printing anything if any
-	// model in the session has no resolvable price), just checked against
-	// one price per distinct model instead of one per per-model group.
-	seenModels := map[string]bool{}
-	for _, st := range res.Steps {
-		if seenModels[st.Model] {
-			continue
-		}
-		seenModels[st.Model] = true
-		if _, ok := spec.PriceFunc(st.Model, st.CreatedAt); !ok {
-			return fmt.Errorf("no prices configured for model %s", st.Model)
-		}
+	printClaudeDetailTableAndTotal(steps, spec)
+
+	return nil
+}
+
+// claudeDominantModelAndPriceCheck returns steps' dominant model, after the
+// same fail-fast price check claudeDetail has always done: bail before
+// printing anything if the dominant model, or any other model appearing in
+// the session, has no resolvable price. Shared between the file-backed path
+// above and its store fallback (claudeDetailFromStore) so both fail exactly
+// the same way on an unpriced model.
+func claudeDominantModelAndPriceCheck(steps []sessionStep, spec agentPricingSpec) (string, error) {
+	modelCount := make(map[string]int, len(steps))
+	for _, s := range steps {
+		modelCount[s.Model]++
+	}
+	primaryModel := dominantModel(modelCount)
+
+	if _, ok := spec.PriceFunc(primaryModel, 0); !ok {
+		return "", fmt.Errorf("no prices configured for model %s", primaryModel)
 	}
 
-	// One continuous ideal-cache pass over the session's untouched step
-	// order — see computeSessionPricing's doc comment (web_store.go) for why
-	// splitting by model first (the old byModel := groupStepsByModel(...)
-	// here) inflates Ideal and can produce the impossible Paid < Ideal.
-	steps := make([]sessionStep, len(res.Steps))
-	tokens := make([]compute.StepData, len(res.Steps))
-	for i, st := range res.Steps {
-		steps[i] = sessionStep{Model: st.Model, Data: st.Step, CreatedAt: st.CreatedAt}
-		tokens[i] = st.Step
+	seenModels := map[string]bool{}
+	for _, s := range steps {
+		if seenModels[s.Model] {
+			continue
+		}
+		seenModels[s.Model] = true
+		if _, ok := spec.PriceFunc(s.Model, s.CreatedAt); !ok {
+			return "", fmt.Errorf("no prices configured for model %s", s.Model)
+		}
+	}
+	return primaryModel, nil
+}
+
+// printClaudeDetailTableAndTotal renders the per-step table and TOTAL
+// section shared by claudeDetail's file-backed path and its store fallback
+// (claudeDetailFromStore) — by the time either calls this, they already
+// have an identically-shaped []sessionStep in hand, and everything past
+// that point (the ideal-cache pass, per-row pricing, the TOTAL summary) is
+// identical regardless of whether the steps came from the source JSONL or
+// from the store.
+func printClaudeDetailTableAndTotal(steps []sessionStep, spec agentPricingSpec) {
+	tokens := make([]compute.StepData, len(steps))
+	for i, s := range steps {
+		tokens[i] = s.Data
 	}
 	rows := compute.ComputeIdealClaude(tokens, compute.ModelPrices{})
 
@@ -732,8 +787,121 @@ func claudeDetail(input string) error {
 	fmt.Printf("Actual paid:  $%.2f\n", totalActual)
 	fmt.Printf("Ideal paid:   $%.2f\n", totalIdeal)
 	fmt.Printf("Overpay:      $%.2f (%.1f%% of ideal)\n", totalOverpay, pctIdeal)
+}
+
+// claudeDetailFromStore renders `claude detail` for a session whose source
+// JSONL is no longer on disk but is still cached in the local store — every
+// previously-ingested session is a real cache since 2486511 ("perf(ingest):
+// use the store as a cache instead of re-parsing every session"), so a
+// rotated or deleted source file no longer has to mean the session is gone.
+//
+// The per-step token/cost/model data the table below needs lives in the
+// message table exactly as it would have come from the file (see
+// store/messages.go's GetMessages and ingest_main.go's detailToStore, which
+// is what put it there at ingest time), so this reproduces byte-for-byte
+// what the file-backed path would have printed for the same session, with
+// one visible difference: the "File:" line, since the store never recorded
+// the file's own path, and an explicit note that the source is gone.
+//
+// notFound is resolveClaudeSessionPath's original "session not found"
+// error. It is returned unchanged when the store doesn't know the session
+// either (sql.ErrNoRows) — never silently swallowed — and a genuine store
+// error (corrupt db, open failure) is wrapped around it instead of being
+// misreported as "not found".
+func claudeDetailFromStore(sessionID string, notFound error) error {
+	st, err := ensureDetailStore()
+	if err != nil {
+		return fmt.Errorf("%w (also failed to open the store to check for a cached copy: %v)", notFound, err)
+	}
+
+	ctx := context.Background()
+	sess, err := st.GetSession(ctx, "claude", sessionID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return notFound
+		}
+		return fmt.Errorf("checking store for Claude session %s: %w", sessionID, err)
+	}
+
+	msgs, err := st.GetMessages(ctx, "claude", sessionID)
+	if err != nil {
+		return fmt.Errorf("reading store for Claude session %s: %w", sessionID, err)
+	}
+	steps := stepsFromAssistantMessages(msgs)
+	if len(steps) == 0 {
+		return fmt.Errorf("Claude session %s is in the store but has no assistant messages recorded", sessionID)
+	}
+
+	spec := buildPricingSpecs()["claude"]
+	primaryModel, err := claudeDominantModelAndPriceCheck(steps, spec)
+	if err != nil {
+		return err
+	}
+
+	stats, err := st.SessionStats(ctx, "claude", sessionID)
+	if err != nil {
+		return fmt.Errorf("reading store stats for Claude session %s: %w", sessionID, err)
+	}
+
+	fmt.Printf("Session:  %s\n", sessionID)
+	fmt.Println("File:     (not found on disk)")
+	fmt.Printf("Project:  %s\n", sess.Project)
+	fmt.Printf("Model:    %s\n", primaryModel)
+	fmt.Printf("Messages: %d\n", len(steps))
+	fmt.Printf("ToolCalls: %d\n\n", stats.ToolCallCount)
+	fmt.Println("note: the source session file is missing from disk; the figures above and below are read from tokeneks' local store cache (as of this session's last ingest) instead of the raw JSONL.")
+	fmt.Println()
+
+	printClaudeDetailTableAndTotal(steps, spec)
 
 	return nil
+}
+
+// ensureDetailStore returns the process-wide store, opening it if no earlier
+// command (e.g. `sync`, `web`, `total`) already did. `claude detail`/`pi
+// detail` don't normally touch the store at all — they read the source
+// JSONL directly — so this only runs on the store-fallback path, once a
+// lookup on disk has already come up empty.
+func ensureDetailStore() (*store.Store, error) {
+	if st := getTokeneksStore(); st != nil {
+		return st, nil
+	}
+	st, err := openTokeneksStore()
+	if err != nil {
+		return nil, err
+	}
+	setTokeneksStore(st)
+	return st, nil
+}
+
+// stepsFromAssistantMessages converts a session's stored messages into the
+// []sessionStep shape the pricing/table-rendering code needs, keeping only
+// role=assistant rows (role=user/tool messages carry no token usage) in
+// their original msg_index order (GetMessages already orders by it). Shared
+// between the Claude and PI store fallbacks — the store's message columns
+// (input_tokens, cache_read, cache_write, cache_write_1h, output_tokens,
+// model, cost, created_at) mean exactly the same thing for both agents.
+func stepsFromAssistantMessages(msgs []store.Message) []sessionStep {
+	steps := make([]sessionStep, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role != store.RoleAssistant {
+			continue
+		}
+		steps = append(steps, sessionStep{
+			Model:      m.Model,
+			Provider:   m.Provider,
+			LoggedCost: m.Cost,
+			CreatedAt:  m.CreatedAt,
+			Data: compute.StepData{
+				Input:           m.InputTokens,
+				CacheCreation:   m.CacheWrite,
+				CacheCreation1h: m.CacheWrite1h,
+				CacheRead:       m.CacheRead,
+				Output:          m.OutputTokens,
+			},
+		})
+	}
+	return steps
 }
 
 func claudeList(days int, date string) error {

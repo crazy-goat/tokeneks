@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -469,6 +472,21 @@ func cleanProjectName(dirName string) string {
 	return strings.ReplaceAll(name, "-", "/")
 }
 
+// piSessionNotFoundError marks a clean "no file matched" result from
+// resolvePISessionPath's walk (neither a root session nor a subsession id
+// matched), as opposed to the walk itself failing (a permissions problem, a
+// corrupt directory, ...) — that case is returned as-is and must never be
+// mistaken for this one. piDetail uses errors.As to route only this case to
+// the store fallback (see piDetailFromStore) and lets every other error
+// propagate untouched.
+type piSessionNotFoundError struct {
+	id string
+}
+
+func (e *piSessionNotFoundError) Error() string {
+	return fmt.Sprintf("PI session not found: %s", e.id)
+}
+
 func resolvePISessionPath(input string, days int) (string, string, error) {
 	if strings.HasSuffix(input, ".jsonl") || strings.Contains(input, "/") {
 		return input, "", nil
@@ -513,12 +531,23 @@ func resolvePISessionPath(input string, days int) (string, string, error) {
 	if childMatch != "" {
 		return childMatch, input, nil
 	}
-	return "", "", fmt.Errorf("PI session not found: %s", input)
+	return "", "", &piSessionNotFoundError{id: input}
 }
 
 func piDetail(input string, days int) error {
 	fp, sessionID, err := resolvePISessionPath(input, days)
 	if err != nil {
+		var notFound *piSessionNotFoundError
+		if errors.As(err, &notFound) {
+			// The walk completed cleanly and matched neither a root session
+			// nor a subsession id — the source JSONL may have been rotated
+			// or deleted while the session stayed in the store (a real
+			// cache since commit 2486511). Fall back to it rather than
+			// failing outright. Any other error from resolvePISessionPath
+			// (a walk failure, a permissions problem) skips this branch
+			// entirely and is returned untouched below.
+			return piDetailFromStore(notFound.id, err)
+		}
 		return err
 	}
 
@@ -557,10 +586,25 @@ func piDetail(input string, days int) error {
 	spec := buildPricingSpecs()["pi"]
 
 	steps := make([]sessionStep, len(data.Steps))
-	tokens := make([]compute.StepData, len(data.Steps))
 	for i, st := range data.Steps {
 		steps[i] = sessionStep{Model: st.Model, LoggedCost: st.Cost, Data: st.Step, CreatedAt: st.CreatedAt}
-		tokens[i] = st.Step
+	}
+
+	printPIDetailTableAndTotal(steps, spec)
+
+	return nil
+}
+
+// printPIDetailTableAndTotal renders the per-step table, TOTAL section and
+// unpriced-model report shared by piDetail's file-backed path and its store
+// fallback (piDetailFromStore) — by the time either calls this, they already
+// have an identically-shaped []sessionStep in hand, and everything past that
+// point is identical regardless of whether the steps came from the source
+// JSONL or from the store.
+func printPIDetailTableAndTotal(steps []sessionStep, spec agentPricingSpec) {
+	tokens := make([]compute.StepData, len(steps))
+	for i, s := range steps {
+		tokens[i] = s.Data
 	}
 
 	var rows []compute.IdealRow
@@ -623,6 +667,67 @@ func piDetail(input string, days int) error {
 	fmt.Printf("Overpay:      $%.2f (%.1f%% of ideal)\n", totalOverpay, pctIdeal)
 
 	printUnpricedModels(unpriced)
+}
+
+// piDetailFromStore renders `pi detail` for a session whose source JSONL is
+// no longer on disk but is still cached in the local store — every
+// previously-ingested session is a real cache since 2486511 ("perf(ingest):
+// use the store as a cache instead of re-parsing every session"), so a
+// rotated or deleted source file no longer has to mean the session is gone.
+//
+// The per-step token/cost/model data the table below needs lives in the
+// message table exactly as it would have come from the file (see
+// store/messages.go's GetMessages and ingest_main.go's detailToStore, which
+// is what put it there at ingest time), so this reproduces byte-for-byte
+// what the file-backed path would have printed for the same session, with
+// one visible difference: the "File:" line, since the store never recorded
+// the file's own path, and an explicit note that the source is gone.
+//
+// notFound is resolvePISessionPath's original "session not found" error. It
+// is returned unchanged when the store doesn't know the session either
+// (sql.ErrNoRows) — never silently swallowed — and a genuine store error
+// (corrupt db, open failure) is wrapped around it instead of being
+// misreported as "not found".
+func piDetailFromStore(sessionID string, notFound error) error {
+	st, err := ensureDetailStore()
+	if err != nil {
+		return fmt.Errorf("%w (also failed to open the store to check for a cached copy: %v)", notFound, err)
+	}
+
+	ctx := context.Background()
+	sess, err := st.GetSession(ctx, "pi", sessionID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return notFound
+		}
+		return fmt.Errorf("checking store for PI session %s: %w", sessionID, err)
+	}
+
+	msgs, err := st.GetMessages(ctx, "pi", sessionID)
+	if err != nil {
+		return fmt.Errorf("reading store for PI session %s: %w", sessionID, err)
+	}
+	steps := stepsFromAssistantMessages(msgs)
+	if len(steps) == 0 {
+		return fmt.Errorf("PI session %s is in the store but has no assistant messages recorded", sessionID)
+	}
+
+	modelCounts := make(map[string]int, len(steps))
+	for _, s := range steps {
+		modelCounts[s.Model]++
+	}
+	dominant := dominantModel(modelCounts)
+
+	fmt.Printf("Session:  %s\n", sessionID)
+	fmt.Println("File:     (not found on disk)")
+	fmt.Printf("Project:  %s\n", sess.Project)
+	fmt.Printf("Messages: %d\n", len(steps))
+	fmt.Printf("Model:    %s\n\n", dominant)
+	fmt.Println("note: the source session file is missing from disk; the figures above and below are read from tokeneks' local store cache (as of this session's last ingest) instead of the raw JSONL.")
+	fmt.Println()
+
+	spec := buildPricingSpecs()["pi"]
+	printPIDetailTableAndTotal(steps, spec)
 
 	return nil
 }

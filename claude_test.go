@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 	"tokeneks/compute"
+	"tokeneks/store"
 )
 
 // claudeCarryForwardLine builds one raw assistant-message JSONL line with
@@ -249,6 +254,176 @@ func TestClaudeMessages_ZeroUsageLineDoesNotCreatePhantomOrZeroRealUsage(t *test
 	want := compute.StepData{Input: 100, Output: 50}
 	if res.Steps[0].Step != want {
 		t.Errorf("Steps[0].Step = %+v, want %+v (zero-usage line must not zero out the real one)", res.Steps[0].Step, want)
+	}
+}
+
+// TestResolveClaudeSessionPath_FileFound covers the unchanged happy path:
+// resolveClaudeSessionPath must still resolve a bare session id to its file
+// when the file is actually on disk.
+func TestResolveClaudeSessionPath_FileFound(t *testing.T) {
+	baseDir := t.TempDir()
+	projectDir := filepath.Join(baseDir, "proj")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fp := filepath.Join(projectDir, "abc123.jsonl")
+	if err := os.WriteFile(fp, []byte(claudeLine("m1", "claude-sonnet-5", 10, 5, `[{"type":"text"}]`)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prevBase := defaultClaudeSessions
+	defaultClaudeSessions = baseDir
+	t.Cleanup(func() { defaultClaudeSessions = prevBase })
+
+	gotFP, gotID, err := resolveClaudeSessionPath("abc123")
+	if err != nil {
+		t.Fatalf("resolveClaudeSessionPath() = %v", err)
+	}
+	if gotFP != fp {
+		t.Errorf("resolveClaudeSessionPath() path = %q, want %q", gotFP, fp)
+	}
+	if gotID != "abc123" {
+		t.Errorf("resolveClaudeSessionPath() id = %q, want %q", gotID, "abc123")
+	}
+}
+
+// TestResolveClaudeSessionPath_NotFound_ReturnsSentinelType pins down the
+// distinguishable "clean miss" error type claudeDetail relies on to decide
+// whether to fall back to the store — a plain fmt.Errorf here would make
+// that decision indistinguishable from a genuine walk failure.
+func TestResolveClaudeSessionPath_NotFound_ReturnsSentinelType(t *testing.T) {
+	baseDir := t.TempDir()
+	prevBase := defaultClaudeSessions
+	defaultClaudeSessions = baseDir
+	t.Cleanup(func() { defaultClaudeSessions = prevBase })
+
+	_, _, err := resolveClaudeSessionPath("nope")
+	var notFound *claudeSessionNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("resolveClaudeSessionPath() error = %v (%T), want *claudeSessionNotFoundError", err, err)
+	}
+}
+
+// ingestFakeClaudeSession writes a minimal claude session straight into the
+// store, bypassing the file-based parser entirely — used to simulate "the
+// source JSONL is gone but the session survived in the store" without ever
+// touching real ingest code or real files.
+func ingestFakeClaudeSession(t *testing.T, st *store.Store, sessionID, project string, msgs []store.Message) {
+	t.Helper()
+	ps := store.ParsedSession{
+		Session: store.Session{
+			Agent:        "claude",
+			SessionID:    sessionID,
+			Project:      project,
+			CreatedAt:    msgs[0].CreatedAt,
+			LastActivity: msgs[len(msgs)-1].CreatedAt,
+		},
+	}
+	for i, m := range msgs {
+		m.Agent = "claude"
+		m.SessionID = sessionID
+		m.MsgIndex = i
+		m.Role = store.RoleAssistant
+		ps.Messages = append(ps.Messages, store.ParsedMessage{Message: m})
+	}
+	if err := st.IngestSession(context.Background(), ps); err != nil {
+		t.Fatalf("IngestSession: %v", err)
+	}
+}
+
+// TestClaudeDetail_FallsBackToStoreWhenFileMissing is the core case this fix
+// exists for: a session whose source JSONL has been rotated/deleted but is
+// still cached in the local store (a real cache since commit 2486511) must
+// still render, sourced from the store, with a visible note that the file
+// is gone rather than silently pretending nothing changed.
+func TestClaudeDetail_FallsBackToStoreWhenFileMissing(t *testing.T) {
+	st := withTempStore(t)
+	resetClaudeUnknownWarnings()
+
+	emptyDir := t.TempDir()
+	prevBase := defaultClaudeSessions
+	defaultClaudeSessions = emptyDir
+	t.Cleanup(func() { defaultClaudeSessions = prevBase })
+
+	sessionID := "missing-session-1"
+	now := time.Now().UnixMilli()
+	// claude-haiku-4-5 has a single, dated-window-free built-in price
+	// ($1.0/M in, $5.0/M out) so the expected dollar figure doesn't depend
+	// on which side of claudeSonnet5PriceChange the test happens to run.
+	ingestFakeClaudeSession(t, st, sessionID, "work/example", []store.Message{
+		{Model: "claude-haiku-4-5", InputTokens: 1_000_000, OutputTokens: 500_000, CreatedAt: now},
+	})
+
+	var err error
+	out := captureStdout(t, func() { err = claudeDetail(sessionID) })
+	if err != nil {
+		t.Fatalf("claudeDetail() = %v\noutput:\n%s", err, out)
+	}
+
+	if !strings.Contains(out, "File:     (not found on disk)") {
+		t.Errorf("output missing the 'not found on disk' File line:\n%s", out)
+	}
+	if !strings.Contains(out, "note:") || !strings.Contains(out, "store cache") {
+		t.Errorf("output missing a visible fallback note telling the user the source is gone:\n%s", out)
+	}
+	if !strings.Contains(out, "work/example") {
+		t.Errorf("output missing the project recorded in the store:\n%s", out)
+	}
+	if !strings.Contains(out, "claude-haiku-4-5") {
+		t.Errorf("output missing the model recorded in the store:\n%s", out)
+	}
+
+	actual, ideal := parseTotalActualIdeal(t, out)
+	wantActual := (1_000_000*1.0 + 500_000*5.0) / 1e6
+	const centTolerance = 0.006
+	if math.Abs(actual-wantActual) > centTolerance {
+		t.Errorf("Actual paid = $%.6f, want $%.6f", actual, wantActual)
+	}
+	// No cache activity at all in this session, so Ideal must equal Actual.
+	if math.Abs(ideal-wantActual) > centTolerance {
+		t.Errorf("Ideal paid = $%.6f, want $%.6f", ideal, wantActual)
+	}
+}
+
+// TestClaudeDetail_NotFoundAnywhere_ReturnsNotFoundError covers the case
+// where neither the file walk nor the store know the session: the original
+// "session not found" message must still surface, not some new fallback
+// error, and it must not silently succeed.
+func TestClaudeDetail_NotFoundAnywhere_ReturnsNotFoundError(t *testing.T) {
+	withTempStore(t)
+
+	emptyDir := t.TempDir()
+	prevBase := defaultClaudeSessions
+	defaultClaudeSessions = emptyDir
+	t.Cleanup(func() { defaultClaudeSessions = prevBase })
+
+	err := claudeDetail("does-not-exist-anywhere")
+	if err == nil {
+		t.Fatal("claudeDetail() = nil, want a not-found error")
+	}
+	if !strings.Contains(err.Error(), "Claude session not found: does-not-exist-anywhere") {
+		t.Errorf("claudeDetail() error = %v, want it to carry the original not-found message", err)
+	}
+}
+
+// TestClaudeDetail_WalkFailureNotMisreportedAsNotFound guards against a real
+// I/O error (here: the sessions root itself doesn't exist, which is what a
+// permissions problem or a corrupt mount would also surface as) being
+// swallowed into the friendlier-looking "session not found" / store-fallback
+// path. Such an error must propagate as-is.
+func TestClaudeDetail_WalkFailureNotMisreportedAsNotFound(t *testing.T) {
+	withTempStore(t)
+
+	prevBase := defaultClaudeSessions
+	defaultClaudeSessions = filepath.Join(t.TempDir(), "does-not-exist")
+	t.Cleanup(func() { defaultClaudeSessions = prevBase })
+
+	err := claudeDetail("anything")
+	if err == nil {
+		t.Fatal("claudeDetail() = nil, want a walk error")
+	}
+	if strings.Contains(err.Error(), "session not found") {
+		t.Errorf("claudeDetail() error = %v — a walk/stat failure must not be reported as \"session not found\"", err)
 	}
 }
 

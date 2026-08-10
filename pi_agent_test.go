@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"tokeneks/compute"
+	"tokeneks/store"
 )
 
 var totalLineRE = regexp.MustCompile(`(?s)Actual paid:\s+\$([0-9.]+).*?Ideal paid:\s+\$([0-9.]+)`)
@@ -196,6 +199,189 @@ func TestPiList_CarryForwardAcrossModelSwitch(t *testing.T) {
 	}
 	if paid < ideal-centTolerance {
 		t.Errorf("TOTAL Paid ($%.6f) < Ideal ($%.6f) — the impossible split-by-model result this fix exists to prevent", paid, ideal)
+	}
+}
+
+// TestResolvePISessionPath_FileFound covers the unchanged happy path:
+// resolvePISessionPath must still resolve a bare session id to its file when
+// the file is actually on disk.
+func TestResolvePISessionPath_FileFound(t *testing.T) {
+	fp := writePISessionFile(t, []string{
+		piTestMessageLine("2026-08-10T00:00:00.000Z", "test-model-a", 10, 0, 0, 5, 0),
+	})
+	sessionID, err := piSessionIDFromFilename(filepath.Base(fp))
+	if err != nil {
+		t.Fatalf("piSessionIDFromFilename: %v", err)
+	}
+
+	prevBase := defaultPISessions
+	defaultPISessions = filepath.Dir(fp)
+	t.Cleanup(func() { defaultPISessions = prevBase })
+
+	gotFP, gotID, err := resolvePISessionPath(sessionID, -1)
+	if err != nil {
+		t.Fatalf("resolvePISessionPath() = %v", err)
+	}
+	if gotFP != fp {
+		t.Errorf("resolvePISessionPath() path = %q, want %q", gotFP, fp)
+	}
+	if gotID != sessionID {
+		t.Errorf("resolvePISessionPath() id = %q, want %q", gotID, sessionID)
+	}
+}
+
+// TestResolvePISessionPath_NotFound_ReturnsSentinelType pins down the
+// distinguishable "clean miss" error type piDetail relies on to decide
+// whether to fall back to the store — a plain fmt.Errorf here would make
+// that decision indistinguishable from a genuine walk failure.
+func TestResolvePISessionPath_NotFound_ReturnsSentinelType(t *testing.T) {
+	baseDir := t.TempDir()
+	prevBase := defaultPISessions
+	defaultPISessions = baseDir
+	t.Cleanup(func() { defaultPISessions = prevBase })
+
+	_, _, err := resolvePISessionPath("nope", -1)
+	var notFound *piSessionNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("resolvePISessionPath() error = %v (%T), want *piSessionNotFoundError", err, err)
+	}
+}
+
+// ingestFakePISession writes a minimal PI session straight into the store,
+// bypassing the file-based parser entirely — used to simulate "the source
+// JSONL is gone but the session survived in the store" without touching real
+// ingest code or real files.
+func ingestFakePISession(t *testing.T, st *store.Store, sessionID, project string, msgs []store.Message) {
+	t.Helper()
+	ps := store.ParsedSession{
+		Session: store.Session{
+			Agent:        "pi",
+			SessionID:    sessionID,
+			Project:      project,
+			CreatedAt:    msgs[0].CreatedAt,
+			LastActivity: msgs[len(msgs)-1].CreatedAt,
+		},
+	}
+	for i, m := range msgs {
+		m.Agent = "pi"
+		m.SessionID = sessionID
+		m.MsgIndex = i
+		m.Role = store.RoleAssistant
+		ps.Messages = append(ps.Messages, store.ParsedMessage{Message: m})
+	}
+	if err := st.IngestSession(context.Background(), ps); err != nil {
+		t.Fatalf("IngestSession: %v", err)
+	}
+}
+
+// TestPiDetail_FallsBackToStoreWhenFileMissing is the core case this fix
+// exists for: a session whose source JSONL has been rotated/deleted but is
+// still cached in the local store (a real cache since commit 2486511) must
+// still render, sourced from the store, with a visible note that the file is
+// gone rather than silently pretending nothing changed.
+func TestPiDetail_FallsBackToStoreWhenFileMissing(t *testing.T) {
+	prevPrices := piPricesFunc
+	piPricesFunc = func() map[string]compute.ModelPrices {
+		return map[string]compute.ModelPrices{
+			"test-model-a": {Input: 5.0, CacheCreation: 6.25, CacheRead: 0.5, Output: 25.0, SupportsCacheCreation: true},
+		}
+	}
+	t.Cleanup(func() { piPricesFunc = prevPrices })
+	st := withTempStore(t)
+	resetAgentPriceWarnings()
+
+	emptyDir := t.TempDir()
+	prevBase := defaultPISessions
+	defaultPISessions = emptyDir
+	t.Cleanup(func() { defaultPISessions = prevBase })
+
+	sessionID := "missing-pi-session-1"
+	now := time.Now().UnixMilli()
+	// The store's message.cost column is PI's own logged cost (see
+	// stepsFromAssistantMessages / detailToStore). It's set here to a value
+	// that deliberately differs from what the rate table would compute
+	// (1.75, see wantIdeal below), so a correct Actual of 1.23 proves the
+	// fallback really is preferring PI's logged cost — the same preference
+	// computeSessionPricing gives the file-backed path — rather than
+	// silently recomputing it from the rate table.
+	wantCost := 1.23
+	ingestFakePISession(t, st, sessionID, "work/pi-example", []store.Message{
+		{Model: "test-model-a", InputTokens: 100_000, OutputTokens: 50_000, Cost: wantCost, CreatedAt: now},
+	})
+
+	var err error
+	out := captureStdout(t, func() { err = piDetail(sessionID, -1) })
+	if err != nil {
+		t.Fatalf("piDetail() = %v\noutput:\n%s", err, out)
+	}
+
+	if !strings.Contains(out, "File:     (not found on disk)") {
+		t.Errorf("output missing the 'not found on disk' File line:\n%s", out)
+	}
+	if !strings.Contains(out, "note:") || !strings.Contains(out, "store cache") {
+		t.Errorf("output missing a visible fallback note telling the user the source is gone:\n%s", out)
+	}
+	if !strings.Contains(out, "work/pi-example") {
+		t.Errorf("output missing the project recorded in the store:\n%s", out)
+	}
+	if !strings.Contains(out, "test-model-a") {
+		t.Errorf("output missing the model recorded in the store:\n%s", out)
+	}
+
+	actual, ideal := parseTotalActualIdeal(t, out)
+	const centTolerance = 0.006
+	if math.Abs(actual-wantCost) > centTolerance {
+		t.Errorf("Actual paid = $%.6f, want $%.6f (PI's own logged cost)", actual, wantCost)
+	}
+	// Ideal is never overridden by the logged cost — see
+	// computeSessionPricing (web_store.go): only Paid prefers it. With no
+	// cache activity and a single step, Ideal is just this step's tokens
+	// priced straight from the rate table above (100_000*5.0 + 50_000*25.0)/1e6.
+	wantIdeal := (100_000*5.0 + 50_000*25.0) / 1e6
+	if math.Abs(ideal-wantIdeal) > centTolerance {
+		t.Errorf("Ideal paid = $%.6f, want $%.6f (rate-derived, not the logged cost)", ideal, wantIdeal)
+	}
+}
+
+// TestPiDetail_NotFoundAnywhere_ReturnsNotFoundError covers the case where
+// neither the file walk nor the store know the session: the original
+// "session not found" message must still surface, not some new fallback
+// error, and it must not silently succeed.
+func TestPiDetail_NotFoundAnywhere_ReturnsNotFoundError(t *testing.T) {
+	withTempStore(t)
+
+	emptyDir := t.TempDir()
+	prevBase := defaultPISessions
+	defaultPISessions = emptyDir
+	t.Cleanup(func() { defaultPISessions = prevBase })
+
+	err := piDetail("does-not-exist-anywhere", -1)
+	if err == nil {
+		t.Fatal("piDetail() = nil, want a not-found error")
+	}
+	if !strings.Contains(err.Error(), "PI session not found: does-not-exist-anywhere") {
+		t.Errorf("piDetail() error = %v, want it to carry the original not-found message", err)
+	}
+}
+
+// TestPiDetail_WalkFailureNotMisreportedAsNotFound guards against a real I/O
+// error (here: the sessions root itself doesn't exist, which is what a
+// permissions problem or a corrupt mount would also surface as) being
+// swallowed into the friendlier-looking "session not found" / store-fallback
+// path. Such an error must propagate as-is.
+func TestPiDetail_WalkFailureNotMisreportedAsNotFound(t *testing.T) {
+	withTempStore(t)
+
+	prevBase := defaultPISessions
+	defaultPISessions = filepath.Join(t.TempDir(), "does-not-exist")
+	t.Cleanup(func() { defaultPISessions = prevBase })
+
+	err := piDetail("anything", -1)
+	if err == nil {
+		t.Fatal("piDetail() = nil, want a walk error")
+	}
+	if strings.Contains(err.Error(), "session not found") {
+		t.Errorf("piDetail() error = %v — a walk/stat failure must not be reported as \"session not found\"", err)
 	}
 }
 
