@@ -59,11 +59,23 @@ func TestHandleAPISessionStream_BadPath_Returns400(t *testing.T) {
 // dashboardWindowMs is what /api/sessions uses to turn start/end into the
 // [fromMs, toMs) range handed to the store layer — see its doc comment for
 // why this replaced the old rolling-window-plus-Go-side-filter approach.
+//
+// start/end are parsed in time.Local (not UTC): the dashboard's date picker
+// builds these strings from local-midnight Date objects in the browser, and
+// the dashboard only ever runs on localhost, so the browser's timezone and
+// this server's time.Local are the same machine. These boundaries are
+// checked against time.Date(..., time.Local) rather than a hardcoded UTC
+// instant so the test asserts the *local* interpretation regardless of the
+// machine's offset, and fails under the old time.Parse-in-UTC behaviour on
+// any machine where time.Local != UTC. On a CI box where time.Local == UTC,
+// this test is a no-op for catching the regression — that's inherent to
+// asserting "local" without forcing a non-UTC zone, which would require
+// changing dashboardWindowMs's signature just for testability.
 func TestDashboardWindowMs_CalendarAnchoredWhenStartEndGiven(t *testing.T) {
 	fromMs, toMs := dashboardWindowMs(7, "2026-06-01", "2026-06-03")
 
-	wantFrom := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
-	wantTo := time.Date(2026, 6, 4, 0, 0, 0, 0, time.UTC).UnixMilli() // exclusive: all of June 3rd included
+	wantFrom := time.Date(2026, 6, 1, 0, 0, 0, 0, time.Local).UnixMilli()
+	wantTo := time.Date(2026, 6, 4, 0, 0, 0, 0, time.Local).UnixMilli() // exclusive: all of June 3rd included
 	if fromMs != wantFrom {
 		t.Errorf("fromMs = %d, want %d", fromMs, wantFrom)
 	}
@@ -71,13 +83,39 @@ func TestDashboardWindowMs_CalendarAnchoredWhenStartEndGiven(t *testing.T) {
 		t.Errorf("toMs = %d, want %d", toMs, wantTo)
 	}
 
-	// A message that landed at 23:59:59 on the end date must fall inside
-	// the window — this is exactly the milliseconds-vs-seconds and
-	// inclusive-end mistake the store's last_activity comparisons must not
-	// make.
-	lastMomentOfEndDate := time.Date(2026, 6, 3, 23, 59, 59, 0, time.UTC).UnixMilli()
+	// A message that landed at 23:59:59 local time on the end date must
+	// fall inside the window — this is exactly the milliseconds-vs-seconds
+	// and inclusive-end mistake the store's last_activity comparisons must
+	// not make.
+	lastMomentOfEndDate := time.Date(2026, 6, 3, 23, 59, 59, 0, time.Local).UnixMilli()
 	if !(lastMomentOfEndDate >= fromMs && lastMomentOfEndDate < toMs) {
 		t.Errorf("23:59:59 on the end date is not inside [%d, %d)", fromMs, toMs)
+	}
+}
+
+// Regression test for the UTC/local mismatch bug: the picker builds
+// YYYY-MM-DD strings at local midnight, so the server must not silently
+// reinterpret them as UTC midnight — doing so shifts the window by the
+// machine's UTC offset and misattributes early-morning sessions to the
+// wrong day. This assertion is written to actually fail under the old
+// time.Parse (UTC) behaviour whenever time.Local != UTC, without hardcoding
+// this machine's specific offset: it derives the "wrong" UTC-anchored
+// boundary independently and checks the function's result does not match
+// it (except in the degenerate case where local IS UTC, which is reported
+// rather than silently skipped).
+func TestDashboardWindowMs_StartEndAreLocalNotUTC(t *testing.T) {
+	fromMs, _ := dashboardWindowMs(7, "2026-06-01", "")
+
+	wantLocalMidnight := time.Date(2026, 6, 1, 0, 0, 0, 0, time.Local).UnixMilli()
+	if fromMs != wantLocalMidnight {
+		t.Errorf("fromMs = %d, want local midnight %d", fromMs, wantLocalMidnight)
+	}
+
+	utcMidnight := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	if wantLocalMidnight == utcMidnight {
+		t.Log("time.Local == UTC on this machine; this test cannot distinguish local-vs-UTC parsing here, but the equality check against wantLocalMidnight above still holds")
+	} else if fromMs == utcMidnight {
+		t.Errorf("fromMs = %d matches UTC midnight (%d), not local midnight (%d): dashboardWindowMs is parsing start/end as UTC again", fromMs, utcMidnight, wantLocalMidnight)
 	}
 }
 
@@ -95,6 +133,22 @@ func TestDashboardWindowMs_RollingWhenNoStartEnd(t *testing.T) {
 	}
 	if toMs != unboundedToMs {
 		t.Errorf("toMs = %d, want unbounded (%d)", toMs, unboundedToMs)
+	}
+}
+
+// Malformed start/end must fall back to the rolling default rather than
+// propagating a zero time.Time or an error — time.ParseInLocation's err
+// check must gate the assignment exactly like the old time.Parse did.
+func TestDashboardWindowMs_MalformedDatesIgnored(t *testing.T) {
+	before := time.Now().Add(-7 * 24 * time.Hour).UnixMilli()
+	fromMs, toMs := dashboardWindowMs(7, "not-a-date", "also-not-a-date")
+	after := time.Now().Add(-7 * 24 * time.Hour).UnixMilli()
+
+	if fromMs < before || fromMs > after {
+		t.Errorf("fromMs = %d, want within [%d, %d] (malformed start should be ignored)", fromMs, before, after)
+	}
+	if toMs != unboundedToMs {
+		t.Errorf("toMs = %d, want unbounded (%d) (malformed end should be ignored)", toMs, unboundedToMs)
 	}
 }
 

@@ -170,8 +170,8 @@ var webDetailHTML []byte
 //
 // With no start/end at all, this is exactly the CLI's rolling window for the
 // same days value: fromMs = now-days*24h, unbounded above. Once start and/or
-// end is given, the window becomes calendar-anchored at UTC midnight of each
-// date instead — start/end used to only round-trip through
+// end is given, the window becomes calendar-anchored at *local* midnight of
+// each date instead — start/end used to only round-trip through
 // filterWebSessionsByDateRange (an exact, correct filter) after first
 // over-fetching via a *rolling* window guessed to be wide enough
 // (`effectiveDays = daysSinceStart + 2`) to contain it. That guessed number
@@ -182,20 +182,33 @@ var webDetailHTML []byte
 // threading it through both the fetch and the cache key removes the guess
 // entirely.
 //
+// Local, not UTC: the dashboard's date picker (web/index.html,
+// applyQuickRange) builds these YYYY-MM-DD strings from local-midnight
+// `Date` objects in the browser, so a string like "2026-06-01" means "June 1
+// where the user is sitting", not "June 1 UTC". The dashboard only ever runs
+// on localhost, so the browser's local timezone and this server's
+// time.Local are the same machine — parsing in time.Local is what makes the
+// two sides agree on what day was actually picked. Parsing in UTC instead
+// silently shifts the window by the machine's UTC offset (e.g. "today" at
+// UTC+2 becomes [02:00 today, 02:00 tomorrow) local time), misattributing
+// early-morning sessions to the wrong day.
+//
 // end is exclusive of the *next* day, i.e. inclusive of all of the named end
 // date — a picked "today" must include everything that happened today, not
-// stop at UTC midnight this morning.
+// stop at local midnight this morning. AddDate(0, 0, 1) rather than
+// Add(24*time.Hour) so this stays correct across DST transitions, where a
+// local calendar day is not always exactly 24 hours.
 func dashboardWindowMs(days int, start, end string) (fromMs, toMs int64) {
 	fromMs = time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
 	toMs = unboundedToMs
 	if start != "" {
-		if t, err := time.Parse("2006-01-02", start); err == nil {
+		if t, err := time.ParseInLocation("2006-01-02", start, time.Local); err == nil {
 			fromMs = t.UnixMilli()
 		}
 	}
 	if end != "" {
-		if t, err := time.Parse("2006-01-02", end); err == nil {
-			toMs = t.Add(24 * time.Hour).UnixMilli()
+		if t, err := time.ParseInLocation("2006-01-02", end, time.Local); err == nil {
+			toMs = t.AddDate(0, 0, 1).UnixMilli()
 		}
 	}
 	return fromMs, toMs
