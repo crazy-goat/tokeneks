@@ -9,6 +9,34 @@ import (
 	"tokeneks/compute"
 )
 
+// localVsUTCDayMismatch picks an instant whose *local* calendar date
+// differs from its *UTC* calendar date, for regression tests across the
+// package that must fail under an old UTC-based date comparison and pass
+// under a fixed local-based one — the same trick web_test.go's
+// TestDashboardWindowMs_StartEndAreLocalNotUTC uses for dashboardWindowMs,
+// generalized to any nonzero UTC offset in either direction:
+//
+//   - A positive offset (local ahead of UTC, e.g. UTC+2) makes local's very
+//     first half hour of a day fall on UTC's *previous* day — candidate 1.
+//   - A negative offset (local behind UTC, e.g. UTC-5) makes local's very
+//     last half hour of a day fall on UTC's *next* day — candidate 2.
+//
+// Trying both catches either sign. Returns ok=false only in the genuine
+// offset==0 case, where no instant can disagree — callers should log a
+// no-op note there rather than fail, exactly as the web.go test does.
+func localVsUTCDayMismatch(t *testing.T) (instant time.Time, localDate string, ok bool) {
+	t.Helper()
+	for _, c := range []time.Time{
+		time.Date(2026, 6, 1, 0, 30, 0, 0, time.Local),
+		time.Date(2026, 6, 1, 23, 30, 0, 0, time.Local),
+	} {
+		if c.Format("2006-01-02") != c.UTC().Format("2006-01-02") {
+			return c, c.Format("2006-01-02"), true
+		}
+	}
+	return time.Time{}, "", false
+}
+
 func TestExpandHome_TildeSlash(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {

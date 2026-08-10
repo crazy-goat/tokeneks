@@ -124,6 +124,62 @@ func TestClaudeList_CarryForwardAcrossModelSwitch(t *testing.T) {
 	}
 }
 
+// TestClaudeSessions_DateFilterUsesLocalNotUTC is a regression test for the
+// bug this fix removes: claudeSessions compared --date (a local calendar
+// day the user typed) against activity.UTC().Format("2006-01-02"), so a
+// session near local midnight fell on the wrong side of the filter whenever
+// the machine's UTC offset was nonzero — the same class of bug already
+// fixed server-side for the web dashboard by dashboardWindowMs (web.go).
+func TestClaudeSessions_DateFilterUsesLocalNotUTC(t *testing.T) {
+	instant, localDate, ok := localVsUTCDayMismatch(t)
+	if !ok {
+		t.Log("time.Local == UTC on this machine; cannot exercise the local-vs-UTC distinction here")
+		return
+	}
+
+	baseDir := t.TempDir()
+	projectDir := filepath.Join(baseDir, "proj")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fp := filepath.Join(projectDir, "session1.jsonl")
+	line := `{"type":"assistant","message":{"id":"msg1","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":50},"content":[{"type":"text"}]},"timestamp":"` +
+		instant.UTC().Format(time.RFC3339Nano) + `"}` + "\n"
+	if err := os.WriteFile(fp, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prevBase := defaultClaudeSessions
+	defaultClaudeSessions = baseDir
+	t.Cleanup(func() { defaultClaudeSessions = prevBase })
+
+	utcDate := instant.UTC().Format("2006-01-02")
+	if utcDate == localDate {
+		t.Fatalf("test setup bug: utcDate (%s) should differ from localDate (%s)", utcDate, localDate)
+	}
+
+	got, err := claudeSessions(3650, localDate, "")
+	if err != nil {
+		t.Fatalf("claudeSessions() = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("claudeSessions(date=%s) returned %d sessions, want 1 (an old UTC-based comparison would have filed this session under %s instead)", localDate, len(got), utcDate)
+	}
+	if got[0].Date != localDate {
+		t.Errorf("session.Date = %q, want %q (the local calendar day, not the UTC one)", got[0].Date, localDate)
+	}
+
+	// The instant's UTC calendar day must NOT match — proving the filter is
+	// anchored on local, not coincidentally matching both.
+	gotUTC, err := claudeSessions(3650, utcDate, "")
+	if err != nil {
+		t.Fatalf("claudeSessions() = %v", err)
+	}
+	if len(gotUTC) != 0 {
+		t.Errorf("claudeSessions(date=%s) returned %d sessions, want 0 (that's the instant's UTC day, not its local one)", utcDate, len(gotUTC))
+	}
+}
+
 // writeClaudeJSONL writes lines (already-serialized JSON, one per line) to a
 // fresh file under t.TempDir() and returns its path.
 func writeClaudeJSONL(t *testing.T, lines []string) string {

@@ -202,6 +202,115 @@ func TestPiList_CarryForwardAcrossModelSwitch(t *testing.T) {
 	}
 }
 
+// piFilenameFor builds a PI session filename that embeds instant as PI
+// itself does: a JS Date.toISOString() with ':' and '.' swapped for '-'
+// (filesystem-safe), e.g. "2026-06-01T22-30-00-000Z_test.jsonl" — see
+// piFilenameCreatedAt's doc comment, which parses this exact shape back.
+func piFilenameFor(instant time.Time) string {
+	u := instant.UTC()
+	return fmt.Sprintf("%04d-%02d-%02dT%02d-%02d-%02d-%03dZ_test.jsonl",
+		u.Year(), u.Month(), u.Day(), u.Hour(), u.Minute(), u.Second(), u.Nanosecond()/1e6)
+}
+
+// TestPiSessions_DateFilterUsesLocalNotUTC is a regression test for the bug
+// this fix removes: piSessions matched --date (a local calendar day the
+// user typed) against the UTC calendar day PI encodes at the start of every
+// session filename (fileDateFromFilename's raw prefix), so a session
+// created near local midnight fell on the wrong side of the filter whenever
+// the machine's UTC offset was nonzero. See claudeSessions (claude.go) and
+// dashboardWindowMs (web.go) for the same class of bug fixed elsewhere.
+func TestPiSessions_DateFilterUsesLocalNotUTC(t *testing.T) {
+	instant, localDate, ok := localVsUTCDayMismatch(t)
+	if !ok {
+		t.Log("time.Local == UTC on this machine; cannot exercise the local-vs-UTC distinction here")
+		return
+	}
+
+	baseDir := t.TempDir()
+	sessionsDir := filepath.Join(baseDir, "proj")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fp := filepath.Join(sessionsDir, piFilenameFor(instant))
+	content := piTestMessageLine(instant.UTC().Format(time.RFC3339Nano), "test-model-a", 100, 0, 0, 50, 0) + "\n"
+	if err := os.WriteFile(fp, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prevBase := defaultPISessions
+	defaultPISessions = baseDir
+	t.Cleanup(func() { defaultPISessions = prevBase })
+
+	utcDate := instant.UTC().Format("2006-01-02")
+	if utcDate == localDate {
+		t.Fatalf("test setup bug: utcDate (%s) should differ from localDate (%s)", utcDate, localDate)
+	}
+
+	got, err := piSessions(3650, localDate)
+	if err != nil {
+		t.Fatalf("piSessions() = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("piSessions(date=%s) returned %d sessions, want 1 (an old UTC-based comparison would have filed this session under %s instead)", localDate, len(got), utcDate)
+	}
+	if got[0].Date != localDate {
+		t.Errorf("session.Date = %q, want %q (the local calendar day, not the UTC one)", got[0].Date, localDate)
+	}
+
+	// The instant's UTC calendar day (the filename's raw prefix) must NOT
+	// match — proving the filter is anchored on local, not the filename's
+	// literal, UTC-encoded prefix.
+	gotUTC, err := piSessions(3650, utcDate)
+	if err != nil {
+		t.Fatalf("piSessions() = %v", err)
+	}
+	if len(gotUTC) != 0 {
+		t.Errorf("piSessions(date=%s) returned %d sessions, want 0 (that's the instant's UTC day, not its local one)", utcDate, len(gotUTC))
+	}
+}
+
+// TestPiSubsessionCount_DateFilterUsesLocalNotUTC is a regression test for
+// the same bug as TestPiSessions_DateFilterUsesLocalNotUTC, in
+// piSubsessionCount: it formatted a subsession file's mtime in UTC before
+// comparing against --date, a local calendar day.
+func TestPiSubsessionCount_DateFilterUsesLocalNotUTC(t *testing.T) {
+	instant, localDate, ok := localVsUTCDayMismatch(t)
+	if !ok {
+		t.Log("time.Local == UTC on this machine; cannot exercise the local-vs-UTC distinction here")
+		return
+	}
+
+	baseDir := t.TempDir()
+	parentPath := filepath.Join(baseDir, "parent.jsonl")
+	if err := os.WriteFile(parentPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Nested layout: <parentBase>/<shortID>/run-0/session.jsonl.
+	nestedDir := filepath.Join(baseDir, "parent", "child", "run-0")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	childPath := filepath.Join(nestedDir, "session.jsonl")
+	if err := os.WriteFile(childPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(childPath, instant, instant); err != nil {
+		t.Fatal(err)
+	}
+
+	utcDate := instant.UTC().Format("2006-01-02")
+	if utcDate == localDate {
+		t.Fatalf("test setup bug: utcDate (%s) should differ from localDate (%s)", utcDate, localDate)
+	}
+
+	if got := piSubsessionCount(parentPath, time.Time{}, localDate); got != 1 {
+		t.Errorf("piSubsessionCount(date=%s) = %d, want 1 (the local calendar day of the child's mtime)", localDate, got)
+	}
+	if got := piSubsessionCount(parentPath, time.Time{}, utcDate); got != 0 {
+		t.Errorf("piSubsessionCount(date=%s) = %d, want 0 (that's the mtime's UTC day, not its local one — an old UTC-based comparison would wrongly match here)", utcDate, got)
+	}
+}
+
 // TestResolvePISessionPath_FileFound covers the unchanged happy path:
 // resolvePISessionPath must still resolve a bare session id to its file when
 // the file is actually on disk.
@@ -487,8 +596,10 @@ func TestPiSubsessionCount_CountsBothLayouts(t *testing.T) {
 	if got := piSubsessionCount(parentPath, time.Now().Add(time.Hour), ""); got != 0 {
 		t.Errorf("piSubsessionCount() with future cutoff = %d, want 0", got)
 	}
-	// Date filtering applies to both layouts alike.
-	today := time.Now().UTC().Format("2006-01-02")
+	// Date filtering applies to both layouts alike. Local, not UTC: date is
+	// meant to be the local calendar day a --date lookup matches against
+	// (see piSubsessionCount's fix for the UTC/local bug this guards).
+	today := time.Now().Local().Format("2006-01-02")
 	if got := piSubsessionCount(parentPath, cutoff, today); got != 2 {
 		t.Errorf("piSubsessionCount(date=%s) = %d, want 2", today, got)
 	}

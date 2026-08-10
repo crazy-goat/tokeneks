@@ -201,6 +201,52 @@ func TestGatherWebSessionsFromStore_WindowIsMillisecondExclusiveOnLastActivity(t
 	}
 }
 
+// TestAggregateSessionsFromStore_DateFilterUsesLocalNotUTC is a regression
+// test for the bug this fix removes: the SQL behind aggregateSessionsFromStore
+// took date(last_activity, 'unixepoch') — which SQLite computes in UTC by
+// default — and compared it straight against date, a local calendar day the
+// caller typed. A session with last_activity near local midnight landed on
+// the wrong side of the filter whenever the machine's UTC offset was
+// nonzero, the same class of bug fixed in claudeSessions (claude.go) and
+// dashboardWindowMs (web.go). aggregateSessionsFromStore's date branch has
+// no wired-up CLI flag today (every call site passes ""), but the bug lives
+// in the function regardless of whether anything currently reaches it.
+func TestAggregateSessionsFromStore_DateFilterUsesLocalNotUTC(t *testing.T) {
+	instant, localDate, ok := localVsUTCDayMismatch(t)
+	if !ok {
+		t.Log("time.Local == UTC on this machine; cannot exercise the local-vs-UTC distinction here")
+		return
+	}
+
+	st := withTempStore(t)
+	ingestSessionAt(t, st, "claude", "sess-1", instant.UnixMilli(), []testStep{
+		step("claude-sonnet-5", 100, 0, 10),
+	})
+
+	utcDate := instant.UTC().Format("2006-01-02")
+	if utcDate == localDate {
+		t.Fatalf("test setup bug: utcDate (%s) should differ from localDate (%s)", utcDate, localDate)
+	}
+
+	got, err := aggregateSessionsFromStore(context.Background(), "claude", 0, localDate)
+	if err != nil {
+		t.Fatalf("aggregateSessionsFromStore: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("aggregateSessionsFromStore(date=%s) returned %d sessions, want 1 (an old UTC-based date() would have filed this session under %s instead)", localDate, len(got), utcDate)
+	}
+
+	// The instant's UTC calendar day must NOT match — proving the filter is
+	// anchored on local, not coincidentally matching both.
+	gotUTC, err := aggregateSessionsFromStore(context.Background(), "claude", 0, utcDate)
+	if err != nil {
+		t.Fatalf("aggregateSessionsFromStore: %v", err)
+	}
+	if len(gotUTC) != 0 {
+		t.Errorf("aggregateSessionsFromStore(date=%s) returned %d sessions, want 0 (that's the instant's UTC day, not its local one)", utcDate, len(gotUTC))
+	}
+}
+
 // A dashboard request for a calendar range and the CLI's own rolling
 // --days N window (aggregateSessionsFromStore's cutoff, mirrored here by
 // calling gatherWebSessionsFromStore with the equivalent fromMs/toMs

@@ -538,7 +538,14 @@ func claudeSessions(days int, date, modelFilter string) ([]claudeSession, error)
 			activity = info.ModTime()
 		}
 		if date != "" {
-			if activity.UTC().Format("2006-01-02") != date {
+			// date is what the user typed on the command line (--date), a
+			// local calendar day, not a UTC one — formatting activity in UTC
+			// here would silently shift the comparison by the machine's UTC
+			// offset (e.g. a session at 00:30 local on the 10th reads as the
+			// 9th in UTC at UTC+2) and drop early-morning/late-night sessions
+			// out of the requested day. See dashboardWindowMs (web.go) for
+			// the same fix applied to the web dashboard's date range.
+			if activity.Local().Format("2006-01-02") != date {
 				return nil
 			}
 		} else if activity.Before(cutoff) {
@@ -557,7 +564,9 @@ func claudeSessions(days int, date, modelFilter string) ([]claudeSession, error)
 		sessionName := filepath.Base(fp)
 		sessionID := strings.TrimSuffix(sessionName, ".jsonl")
 		project := cleanClaudeProjectName(filepath.Base(filepath.Dir(fp)))
-		fileDate := activity.UTC().Format("2006-01-02")
+		// Local, not UTC, for the same reason as the date filter above: this
+		// is meant to be the calendar day a --date lookup matches against.
+		fileDate := activity.Local().Format("2006-01-02")
 		subagentCount := 0
 		if subEntries, err := os.ReadDir(filepath.Join(filepath.Dir(fp), sessionID, "subagents")); err == nil {
 			for _, subEntry := range subEntries {

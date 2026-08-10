@@ -293,6 +293,13 @@ type ocSession struct {
 	ParentID         string
 }
 
+// ocSessions returns OpenCode session summaries, optionally filtered to one
+// calendar date. date is the user-typed --date, a local calendar day, so the
+// SQL below reads s.time_created (UTC ms epoch) with the 'localtime'
+// modifier before taking its date — SQLite's date() defaults to UTC, which
+// would otherwise shift the comparison by the machine's UTC offset and drop
+// sessions from around local midnight, the same bug fixed in claudeSessions
+// (claude.go) and dashboardWindowMs (web.go).
 func ocSessions(days int, date string) ([]ocSession, error) {
 	db, err := openOCDB()
 	if err != nil {
@@ -311,7 +318,7 @@ func ocSessions(days int, date string) ([]ocSession, error) {
 			JOIN part p ON p.session_id = s.id
 			LEFT JOIN project pr ON pr.id = s.project_id
 			WHERE json_extract(p.data, '$.type') = 'step-finish'
-			AND date(s.time_created / 1000, 'unixepoch') = ?
+			AND date(s.time_created / 1000, 'unixepoch', 'localtime') = ?
 			GROUP BY s.id
 			ORDER BY s.time_created ASC
 		`

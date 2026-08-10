@@ -194,6 +194,45 @@ type piSession struct {
 	Data          *piSessionData
 }
 
+// piFilenameCreatedAt parses the UTC creation instant PI encodes at the
+// start of every session filename — a JS Date.toISOString() with ':' and
+// '.' swapped for '-' to stay filesystem-safe, e.g.
+// "2026-05-11T21-07-38-405Z_<uuid>.jsonl" (confirmed against every
+// file under a real ~/.pi/agent/sessions tree while fixing this). Returns
+// false when name isn't in that exact 24-character shape — e.g. the bare
+// "<date>_<id>" form fileDateFromFilename also accepts — since there is no
+// time-of-day to recover from a date-only prefix.
+func piFilenameCreatedAt(name string) (time.Time, bool) {
+	base := strings.TrimSuffix(name, ".jsonl")
+	if strings.IndexByte(base, '_') != 24 || len(base) < 24 {
+		return time.Time{}, false
+	}
+	ts := base[:24]
+	if ts[10] != 'T' || ts[13] != '-' || ts[16] != '-' || ts[19] != '-' || ts[23] != 'Z' {
+		return time.Time{}, false
+	}
+	rfc := ts[:13] + ":" + ts[14:16] + ":" + ts[17:19] + "." + ts[20:23] + "Z"
+	t, err := time.Parse(time.RFC3339Nano, rfc)
+	return t, err == nil
+}
+
+// piSessionLocalDate returns the local calendar date a PI session filename
+// represents, for comparing against --date (a local calendar day the user
+// typed, not a UTC one). PI's filename embeds the session's creation instant
+// in UTC (see piFilenameCreatedAt); reading its date prefix as-is — what
+// fileDateFromFilename does — is the UTC calendar day, and comparing that
+// straight against a local --date is the same bug fixed in claudeSessions
+// (claude.go) and piSubsessionCount below: it misfiles sessions created
+// near local midnight into the wrong day. Falls back to the bare prefix
+// when the filename isn't in the full-timestamp shape, since a date-only
+// name carries no time-of-day to convert.
+func piSessionLocalDate(name string) (string, bool) {
+	if t, ok := piFilenameCreatedAt(name); ok {
+		return t.Local().Format("2006-01-02"), true
+	}
+	return fileDateFromFilename(name)
+}
+
 func piSessions(days int, date string) ([]piSession, error) {
 	baseDir := expandHome(defaultPISessions)
 	cutoff := time.Now().AddDate(0, 0, -days)
@@ -202,7 +241,7 @@ func piSessions(days int, date string) ([]piSession, error) {
 
 	if err := walkSessionFiles(baseDir, func(fp string, info os.FileInfo) error {
 		if date != "" {
-			fdate, ok := fileDateFromFilename(filepath.Base(fp))
+			fdate, ok := piSessionLocalDate(filepath.Base(fp))
 			if !ok || fdate != date {
 				return nil
 			}
@@ -230,7 +269,7 @@ func piSessions(days int, date string) ([]piSession, error) {
 			Filepath:      fp,
 			Project:       project,
 			Title:         title,
-			Date:          func() string { d, _ := fileDateFromFilename(sessionName); return d }(),
+			Date:          func() string { d, _ := piSessionLocalDate(sessionName); return d }(),
 			Msgs:          len(data.Steps),
 			ToolCalls:     data.ToolCalls,
 			Birth:         getCreatedAtFromInfo(info),
@@ -304,7 +343,11 @@ func piSubsessionCount(sessionFilepath string, cutoff time.Time, date string) in
 			return false
 		}
 		if date != "" {
-			return info.ModTime().UTC().Format("2006-01-02") == date
+			// date is the user-typed --date, a local calendar day — see
+			// claudeSessions (claude.go) for the same fix and the reasoning:
+			// formatting in UTC shifts the comparison by the machine's UTC
+			// offset and misfiles sessions from around local midnight.
+			return info.ModTime().Local().Format("2006-01-02") == date
 		}
 		return !info.ModTime().Before(cutoff)
 	}

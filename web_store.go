@@ -839,6 +839,12 @@ type sessionStep struct {
 // Sessions with no messages are excluded — the watcher keeps them in the
 // store purely as a mtime-filter baseline (so it doesn't re-parse them on
 // every poll), but they're never meant to surface in any list.
+//
+// date is a local calendar day (whatever a caller's --date flag was typed
+// as), so last_activity (a UTC ms epoch) is read with SQLite's 'localtime'
+// modifier before taking its date — otherwise date() defaults to UTC and
+// the comparison silently shifts by the machine's UTC offset, the same bug
+// fixed in claudeSessions (claude.go) and dashboardWindowMs (web.go).
 func aggregateSessionsFromStore(ctx context.Context, agent string, days int, date string) ([]CLISession, error) {
 	st := getTokeneksStore()
 	if st == nil {
@@ -849,7 +855,7 @@ func aggregateSessionsFromStore(ctx context.Context, agent string, days int, dat
 	var where string
 	var args []any
 	if date != "" {
-		where = `WHERE agent = ? AND date(last_activity / 1000, 'unixepoch') = ?
+		where = `WHERE agent = ? AND date(last_activity / 1000, 'unixepoch', 'localtime') = ?
 		          AND EXISTS (SELECT 1 FROM message m
 		                      WHERE m.agent = s.agent AND m.session_id = s.session_id)`
 		args = []any{agent, date}

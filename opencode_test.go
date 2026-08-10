@@ -649,6 +649,58 @@ func withOCFixtureSessionDB(t *testing.T) *sql.DB {
 	return db
 }
 
+// TestOcSessions_DateFilterUsesLocalNotUTC is a regression test for the bug
+// this fix removes: the SQL behind ocSessions took date(s.time_created,
+// 'unixepoch') — which SQLite computes in UTC by default — and compared it
+// straight against --date, a local calendar day the user typed. A session
+// created near local midnight landed on the wrong side of the filter
+// whenever the machine's UTC offset was nonzero, the same class of bug
+// fixed in claudeSessions (claude.go) and dashboardWindowMs (web.go).
+func TestOcSessions_DateFilterUsesLocalNotUTC(t *testing.T) {
+	instant, localDate, ok := localVsUTCDayMismatch(t)
+	if !ok {
+		t.Log("time.Local == UTC on this machine; cannot exercise the local-vs-UTC distinction here")
+		return
+	}
+
+	db := withOCFixtureSessionDB(t)
+
+	createdAt := instant.UnixMilli()
+	stmts := []string{
+		fmt.Sprintf(`INSERT INTO session (id, title, model, time_created, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, parent_id, cost, project_id) VALUES ('sess-1', 'T', '{"id":"Kimi K2.6","providerID":"kimi"}', %d, 0, 0, 0, 0, '', 0, '');`, createdAt),
+		`INSERT INTO message (id, data) VALUES ('msg-1', '{"modelID":"Kimi K2.6"}');`,
+		fmt.Sprintf(`INSERT INTO part (session_id, time_created, message_id, data) VALUES ('sess-1', %d, 'msg-1', '{"type":"step-finish","cost":1,"tokens":{"input":1000,"output":0,"cache":{"read":0,"write":0}}}');`, createdAt),
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	utcDate := instant.UTC().Format("2006-01-02")
+	if utcDate == localDate {
+		t.Fatalf("test setup bug: utcDate (%s) should differ from localDate (%s)", utcDate, localDate)
+	}
+
+	got, err := ocSessions(3650, localDate)
+	if err != nil {
+		t.Fatalf("ocSessions() = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ocSessions(date=%s) returned %d sessions, want 1 (an old UTC-based date() would have filed this session under %s instead)", localDate, len(got), utcDate)
+	}
+
+	// The instant's UTC calendar day must NOT match — proving the filter is
+	// anchored on local, not coincidentally matching both.
+	gotUTC, err := ocSessions(3650, utcDate)
+	if err != nil {
+		t.Fatalf("ocSessions() = %v", err)
+	}
+	if len(gotUTC) != 0 {
+		t.Errorf("ocSessions(date=%s) returned %d sessions, want 0 (that's the instant's UTC day, not its local one)", utcDate, len(gotUTC))
+	}
+}
+
 // TestOcList_UnpricedModelExcludedFromTotalsButReportedWithLoggedCost is the
 // contract the task explicitly protects: a model with no price still has no
 // Ideal, so — even though its Paid is now readable straight off the logged
