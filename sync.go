@@ -40,7 +40,7 @@ func runSync(watch, force bool) error {
 
 	ing := &ingest.Ingestor{
 		Store:      st,
-		Agents:     []string{"claude", "pi", "opencode"},
+		Agents:     agentRegistry.Keys(),
 		SourceFor:  sources,
 		ParserFor:  parsers,
 		Log:        log.New(os.Stderr, "[sync] ", log.LstdFlags),
@@ -83,21 +83,9 @@ func openTokeneksStore() (*store.Store, error) {
 	return store.Open(path)
 }
 
+// buildAgentIO projects the agent registry into the source/parser maps the
+// ingester and watcher take. Each agent owns its own source path now (see
+// agent.go), so this no longer has to know where anyone's sessions live.
 func buildAgentIO() (map[string]ingest.Source, map[string]ingest.Parser) {
-	home, _ := os.UserHomeDir()
-	claudeRoot := filepath.Join(home, ".claude", "projects")
-	piRoot := filepath.Join(home, ".pi", "agent", "sessions")
-	ocDB := filepath.Join(home, ".local", "share", "opencode", "opencode.db")
-
-	sources := map[string]ingest.Source{
-		"claude":   ingest.NewClaudeSource(claudeRoot),
-		"pi":       ingest.NewPiSource(piRoot),
-		"opencode": ingest.NewOpenCodeSource(ocDB),
-	}
-	parsers := map[string]ingest.Parser{
-		"claude":   claudeParser,
-		"pi":       piParser,
-		"opencode": ocParser,
-	}
-	return sources, parsers
+	return agentRegistry.Sources(), agentRegistry.Parsers()
 }

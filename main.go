@@ -12,6 +12,19 @@ import (
 var days int
 var dateFilter string
 
+// mustAgent looks up an agent by its CLI subcommand name. The names here are
+// compile-time literals matching agent.go's registrations, so a miss means the
+// binary was built with a command wired to an agent that no longer exists --
+// a programmer error worth failing loudly at startup rather than silently
+// registering a command that panics on first use.
+func mustAgent(command string) Agent {
+	a, ok := agentRegistry.ByCommand(command)
+	if !ok {
+		panic("no agent registered for command " + command)
+	}
+	return a
+}
+
 func registerAgentCommands(root *cobra.Command, agent Agent, listShort, detailUse, detailShort string) {
 	listCmd := &cobra.Command{
 		Use:   "list",
@@ -46,19 +59,19 @@ func main() {
 		Use:   "oc",
 		Short: "OpenCode sessions",
 	}
-	registerAgentCommands(ocCmd, agents["oc"], "List all Kimi K2.6 sessions with summary", "detail <session-id>", "Per-step analysis for a specific session")
+	registerAgentCommands(ocCmd, mustAgent("oc"), "List all Kimi K2.6 sessions with summary", "detail <session-id>", "Per-step analysis for a specific session")
 
 	piCmd := &cobra.Command{
 		Use:   "pi",
 		Short: "PI Agent sessions",
 	}
-	registerAgentCommands(piCmd, agents["pi"], "List all Kimi K2.6 sessions with summary", "detail <session-id|filepath>", "Per-message analysis for a specific PI session")
+	registerAgentCommands(piCmd, mustAgent("pi"), "List all Kimi K2.6 sessions with summary", "detail <session-id|filepath>", "Per-message analysis for a specific PI session")
 
 	claudeCmd := &cobra.Command{
 		Use:   "claude",
 		Short: "Claude Code sessions (Opus 5, Fable 5, Sonnet 5)",
 	}
-	registerAgentCommands(claudeCmd, agents["claude"], "List Claude Code sessions with cache analysis", "detail <session-id|filepath>", "Per-message analysis for a Claude Code session")
+	registerAgentCommands(claudeCmd, mustAgent("claude"), "List Claude Code sessions with cache analysis", "detail <session-id|filepath>", "Per-message analysis for a Claude Code session")
 
 	// total
 	totalCmd := &cobra.Command{

@@ -39,15 +39,7 @@ func getTokeneksStore() *store.Store {
 // agentDisplayName maps the lowercase store agent name to the display name
 // expected by WebSession / SessionDetail (e.g. "opencode" -> "OpenCode").
 func agentDisplayName(agent string) string {
-	switch agent {
-	case "opencode":
-		return "OpenCode"
-	case "pi":
-		return "PI"
-	case "claude":
-		return "Claude"
-	}
-	return agent
+	return agentRegistry.DisplayName(agent)
 }
 
 // unboundedToMs is the upper bound of a [fromMs, toMs) session window when
@@ -957,7 +949,7 @@ func ensureStoreReady() error {
 	sources, parsers := buildAgentIO()
 	ing := &ingest.Ingestor{
 		Store:     st,
-		Agents:    []string{"claude", "pi", "opencode"},
+		Agents:    agentRegistry.Keys(),
 		SourceFor: sources,
 		ParserFor: parsers,
 	}
