@@ -849,11 +849,97 @@ type deriveResult struct {
 	Agent, Model string
 	// From/To is this result's segment window (0/0 for a single, fully
 	// open segment — see deriveSegment). Meaningless for a "rejected:
-	// sample size" result, which never reached segmentation.
+	// sample size" result, which never reached segmentation. For a
+	// "stored"/"dry-run" result, closeSegmentGaps may have pulled From
+	// backward (and, for the very first such result, always sets it to 0;
+	// for the very last, always sets To to 0) from whatever detectSegments
+	// originally computed — see that function's doc comment for why. A
+	// rejected result's From/To are left exactly as detectSegments produced
+	// them (the report shows where the rejected span actually was), since
+	// closeSegmentGaps only ever rewrites the boundaries of results it will
+	// store.
 	From, To int64
 	Msgs     int
 	Fit      fitResult
 	Status   string // "stored", "dry-run", "rejected: error", "rejected: sample size", "rejected: unidentified(...)", "rejected: implausible(...)"
+}
+
+// closeSegmentGaps stitches the surviving ("stored" or "dry-run") entries of
+// one (agent, model)'s segResults — already gated, already in chronological
+// order — into a gapless timeline: for any two surviving windows that used
+// to be separated by one or more rejected segments, the earlier window's To
+// is left alone and the later window's From is pulled backward to meet it,
+// closing the gap entirely. The first surviving window's From is forced to 0
+// and the last's To is forced to 0, so the whole (agent, model) timeline is
+// covered from "since forever" to "still in effect" with no uncovered
+// instant anywhere a lookup could land — see resolveAgentPricesAtSource,
+// which falls through to a worse (undated, or missing) price layer for any
+// timestamp a derived window doesn't cover.
+//
+// Rejected segments are otherwise skipped over as if they never existed:
+// their own From/To are untouched (the printed report still shows exactly
+// where the rejected span was), they contribute no stored window, and they
+// have no effect on any surviving window's *rate* — only on how far a
+// surviving neighbor's boundary now reaches.
+//
+// The choice of which neighbor absorbs a gap — pulling the *later* window's
+// From backward, rather than pushing the *earlier* window's To forward,
+// splitting the gap at its midpoint, or refitting the gap's own messages
+// under relaxed gates — was checked against this project's real store, not
+// picked by intuition. A segment gets rejected in the first place almost
+// always because it straddles a genuine rate change (the two rates mixed
+// together fail the residual/identifiability/plausibility gates that a
+// single clean rate would pass), and by the time detectSegments' merge loop
+// gives up on folding a block into its *later* neighbor, that block's
+// messages are disproportionately already billed at the *later* (post-
+// change) rate — the transition, once it starts, dominates the block almost
+// immediately; only its leading edge still resembles the old rate. Recomputing
+// the actual logged cost of every message inside three real gaps in this
+// store's derived:opencode data (DeepSeek V4 Flash 0731 and GPT 5.6 Luna, one
+// $0.78 gap and two multi-day/multi-dollar ones) at each candidate's rate and
+// comparing to what those messages actually billed confirmed this: pulling
+// the later window backward priced the gap within roughly 15% of the real
+// total in aggregate, pushing the earlier window forward overshot by over
+// 100%, and splitting the gap at its midpoint landed in between but still
+// far worse than the later-window rule on every gap large enough to matter.
+// Refitting the gap as its own segment under relaxed gates was rejected on a
+// different basis: the gate thresholds encode a real judgment about when a
+// rate is trustworthy (see maxErrorPct, minColumnSharePct, plausibilityGate),
+// and loosening them just enough to force a rejected fit through defeats the
+// reason they exist, with no principled stopping point for "how much looser"
+// — it would let exactly the kind of arbitrary coefficient the gates were
+// built to catch back into the store, silently, on every future run with a
+// mid-block rate change.
+//
+// This rule is a real trade-off, not a free win: on the smallest of the
+// three gaps checked (400 messages, $8.02, no real rate change spanning it —
+// just ordinary noise) the later-window rate was very slightly worse than
+// the earlier one (3.5% vs 0.7% of that gap's own total). The rule is chosen
+// for the larger, rate-change gaps it was built for, where the earlier
+// window is off by hundreds of percent — a small, known cost on the rare
+// gap that turns out to have no real change inside it.
+func closeSegmentGaps(segResults []deriveResult) {
+	isSurviving := func(status string) bool { return status == "stored" || status == "dry-run" }
+
+	lastTo := int64(0)
+	first := true
+	lastIdx := -1
+	for i := range segResults {
+		if !isSurviving(segResults[i].Status) {
+			continue
+		}
+		if first {
+			segResults[i].From = 0
+			first = false
+		} else {
+			segResults[i].From = lastTo
+		}
+		lastTo = segResults[i].To
+		lastIdx = i
+	}
+	if lastIdx >= 0 {
+		segResults[lastIdx].To = 0
+	}
 }
 
 // deriveModelRates is the whole computation behind `prices derive`: group
@@ -925,6 +1011,13 @@ func deriveModelRates(ctx context.Context, st *store.Store, days, minMessages in
 		// segments individually gate — see the doc comment above.
 		toDelete = append(toDelete, [2]string{derivedProvider(agent), model})
 
+		// Every segment detectSegments returns is gated independently first
+		// (segResults), *then* the surviving windows are stitched into a
+		// gapless timeline by closeSegmentGaps — see that function's doc
+		// comment for why a rejected segment's span goes to its later
+		// neighbor rather than its earlier one, being split down the
+		// middle, or being force-fit with looser gates.
+		var segResults []deriveResult
 		for _, seg := range detectSegments(msgs, minMessages, segmentTolerancePct, minColumnCV, minColumnSharePct) {
 			res := deriveResult{Agent: agent, Model: model, From: seg.From, To: seg.To, Msgs: seg.Msgs, Fit: seg.Fit}
 
@@ -952,15 +1045,24 @@ func deriveModelRates(ctx context.Context, st *store.Store, days, minMessages in
 					res.Status = "dry-run"
 				} else {
 					res.Status = "stored"
-					prices := seg.Fit.Prices()
-					toStore = append(toStore, store.ModelPrice{
-						Provider: derivedProvider(agent), Model: model, Name: model,
-						Input: prices.Input, Output: prices.Output,
-						CacheRead: prices.CacheRead, CacheWrite: prices.CacheCreation, CacheWrite1h: 0,
-						Source: priceSourceDerived, UpdatedAt: now,
-						EffectiveFrom: seg.From, EffectiveTo: seg.To,
-					})
 				}
+			}
+			segResults = append(segResults, res)
+		}
+
+		closeSegmentGaps(segResults)
+
+		for i := range segResults {
+			res := segResults[i]
+			if res.Status == "stored" {
+				prices := res.Fit.Prices()
+				toStore = append(toStore, store.ModelPrice{
+					Provider: derivedProvider(agent), Model: model, Name: model,
+					Input: prices.Input, Output: prices.Output,
+					CacheRead: prices.CacheRead, CacheWrite: prices.CacheCreation, CacheWrite1h: 0,
+					Source: priceSourceDerived, UpdatedAt: now,
+					EffectiveFrom: res.From, EffectiveTo: res.To,
+				})
 			}
 			results = append(results, res)
 		}

@@ -1104,3 +1104,250 @@ func TestDeriveModelRates_DeletesStaleRowWhenNoLongerQualifies(t *testing.T) {
 		t.Errorf("flaky-model should have been retracted once it no longer qualifies, found: %+v", prices)
 	}
 }
+
+// A rejected segment sitting between two surviving ones must not leave a
+// gap: the earlier survivor's To is left alone and the later survivor's
+// From is pulled backward to meet it, exactly as closeSegmentGaps' doc
+// comment describes. The rejected segment's own window is untouched — the
+// report still shows where the rejected span actually was.
+func TestCloseSegmentGaps_FillsRejectedMiddleGap(t *testing.T) {
+	results := []deriveResult{
+		{From: 0, To: 100, Status: "stored"},
+		{From: 100, To: 200, Status: "rejected: error"},
+		{From: 200, To: 0, Status: "stored"},
+	}
+	closeSegmentGaps(results)
+
+	if results[0].From != 0 || results[0].To != 100 {
+		t.Errorf("results[0] = %+v, want From=0 To=100 (unchanged — it already reaches back to 0, and its own To is where the gap starts)", results[0])
+	}
+	if results[2].From != 100 {
+		t.Errorf("results[2].From = %d, want 100 (pulled backward from 200 to meet results[0].To, absorbing the rejected gap)", results[2].From)
+	}
+	if results[2].To != 0 {
+		t.Errorf("results[2].To = %d, want 0 (open)", results[2].To)
+	}
+	if results[1].From != 100 || results[1].To != 200 {
+		t.Errorf("results[1] = %+v, want unchanged From=100 To=200 — a rejected segment's own window is never rewritten", results[1])
+	}
+}
+
+// The earliest surviving window must reach back to 0 even when it wasn't
+// detectSegments' own first segment — i.e. when the true first segment got
+// rejected. Without this, a model whose oldest messages happened to land in
+// a rejected block would have no price at all for "since forever" up to
+// wherever the first surviving segment starts.
+func TestCloseSegmentGaps_RejectedFirstSegmentReachesBackToZero(t *testing.T) {
+	results := []deriveResult{
+		{From: 0, To: 100, Status: "rejected: error"},
+		{From: 100, To: 0, Status: "stored"},
+	}
+	closeSegmentGaps(results)
+
+	if results[1].From != 0 {
+		t.Errorf("results[1].From = %d, want 0 — the only surviving window must reach back to the start of time", results[1].From)
+	}
+	if results[1].To != 0 {
+		t.Errorf("results[1].To = %d, want 0", results[1].To)
+	}
+	if results[0].From != 0 || results[0].To != 100 {
+		t.Errorf("results[0] = %+v, want unchanged — a rejected segment's own window is never rewritten", results[0])
+	}
+}
+
+// The latest surviving window must stay open (To=0) even when it wasn't
+// detectSegments' own last segment — i.e. when the true last segment got
+// rejected. Without this, a model's most recent traffic (everything after
+// the rejected trailing segment started) would resolve to no price at all.
+func TestCloseSegmentGaps_RejectedLastSegmentStaysOpen(t *testing.T) {
+	results := []deriveResult{
+		{From: 0, To: 100, Status: "stored"},
+		{From: 100, To: 0, Status: "rejected: error"},
+	}
+	closeSegmentGaps(results)
+
+	if results[0].From != 0 {
+		t.Errorf("results[0].From = %d, want 0", results[0].From)
+	}
+	if results[0].To != 0 {
+		t.Errorf("results[0].To = %d, want 0 — forced open now that it's the last surviving window", results[0].To)
+	}
+	if results[1].From != 100 || results[1].To != 0 {
+		t.Errorf("results[1] = %+v, want unchanged — a rejected segment's own window is never rewritten", results[1])
+	}
+}
+
+// A timeline with no rejected segments at all — every block already tiles,
+// as detectSegments guarantees on its own — must come out of
+// closeSegmentGaps byte-for-byte identical. The stitching logic must be a
+// no-op on the common case, not just correct on the gap case.
+func TestCloseSegmentGaps_AlreadyContiguousUnchanged(t *testing.T) {
+	results := []deriveResult{
+		{From: 0, To: 100, Status: "stored"},
+		{From: 100, To: 200, Status: "stored"},
+		{From: 200, To: 0, Status: "stored"},
+	}
+	want := append([]deriveResult(nil), results...)
+	closeSegmentGaps(results)
+	for i := range results {
+		if results[i].From != want[i].From || results[i].To != want[i].To {
+			t.Errorf("results[%d] = %+v, want unchanged %+v", i, results[i], want[i])
+		}
+	}
+}
+
+// A (agent, model) with no surviving segment at all — every one of
+// detectSegments' blocks rejected — must be left completely untouched:
+// there is nothing to stitch, and nothing must be invented.
+func TestCloseSegmentGaps_NoSurvivorsIsNoop(t *testing.T) {
+	results := []deriveResult{
+		{From: 0, To: 100, Status: "rejected: error"},
+		{From: 100, To: 0, Status: "rejected: implausible(input)"},
+	}
+	want := append([]deriveResult(nil), results...)
+	closeSegmentGaps(results)
+	for i := range results {
+		if results[i].From != want[i].From || results[i].To != want[i].To {
+			t.Errorf("results[%d] = %+v, want unchanged %+v", i, results[i], want[i])
+		}
+	}
+}
+
+// --dry-run's preview must show exactly the same stitched windows a real
+// run would store — closeSegmentGaps must treat "dry-run" as a surviving
+// status identically to "stored", or the dry-run preview a user inspects
+// before committing (per this task's own verification instructions) would
+// misrepresent what the real run is about to write.
+func TestCloseSegmentGaps_TreatsDryRunAsSurviving(t *testing.T) {
+	results := []deriveResult{
+		{From: 0, To: 100, Status: "dry-run"},
+		{From: 100, To: 200, Status: "rejected: error"},
+		{From: 200, To: 0, Status: "dry-run"},
+	}
+	closeSegmentGaps(results)
+
+	if results[2].From != 100 {
+		t.Errorf("results[2].From = %d, want 100 — dry-run rows must be stitched exactly like stored ones", results[2].From)
+	}
+}
+
+// The store-level regression this whole feature exists to fix: a rejected
+// segment sandwiched between two good ones (same fixture as
+// TestDeriveModelRates_OneBadSegmentDoesNotAffectSiblings, which checks the
+// surviving rates are unaffected) must not leave the (agent, model)
+// timeline with an uncovered instant. Before closeSegmentGaps existed, the
+// two stored windows here kept detectSegments' original boundaries — the
+// first window's To at the start of the rejected span, the second window's
+// From at its end — leaving every timestamp inside the rejected span
+// resolving to "no price", exactly the live-store bug this task reports.
+func TestDeriveModelRates_RejectedMiddleSegmentLeavesNoGap(t *testing.T) {
+	st := withDeriveStore(t)
+
+	startMs := time.Now().Add(-10 * 24 * time.Hour).UnixMilli()
+	goodRates := compute.ModelPrices{Input: 1.4, CacheRead: 0.26, Output: 4.4}
+	good1 := deriveSeries(75, startMs, goodRates)
+	var bad []deriveMsg
+	for i, m := range deriveSeries(75, startMs+75, goodRates) {
+		m.Cost = 0.01
+		if i%2 == 0 {
+			m.Cost = 50.0
+		}
+		bad = append(bad, m)
+	}
+	good2 := deriveSeries(75, startMs+150, goodRates)
+	msgs := append(append(good1, bad...), good2...)
+	seedDeriveMessages(t, st, "opencode", "sandwiched-model", msgs)
+
+	results, err := deriveModelRates(context.Background(), st, 30, 5, 1.0, 1.0, 0.1, 15.0, 0, false)
+	if err != nil {
+		t.Fatalf("deriveModelRates: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("results = %+v, want 3 segments", results)
+	}
+	if results[1].Status != "rejected: error" {
+		t.Fatalf("middle segment status = %q, want rejected: error", results[1].Status)
+	}
+
+	if results[0].From != 0 {
+		t.Errorf("results[0].From = %d, want 0", results[0].From)
+	}
+	if results[2].To != 0 {
+		t.Errorf("results[2].To = %d, want 0", results[2].To)
+	}
+	if results[0].To != results[2].From {
+		t.Errorf("results[0].To = %d, results[2].From = %d, want equal — no uncovered instant across the rejected segment", results[0].To, results[2].From)
+	}
+
+	prices, err := st.GetModelPrices(context.Background(), derivedProvider("opencode"))
+	if err != nil {
+		t.Fatalf("GetModelPrices: %v", err)
+	}
+	if len(prices) != 2 {
+		t.Fatalf("stored windows = %+v, want 2", prices)
+	}
+	// GetModelPrices orders by effective_from ASC (see store/prices.go), so
+	// prices[0] is the earlier window without needing to sort here.
+	if prices[0].EffectiveFrom != 0 {
+		t.Errorf("first stored window EffectiveFrom = %d, want 0", prices[0].EffectiveFrom)
+	}
+	if prices[1].EffectiveTo != 0 {
+		t.Errorf("last stored window EffectiveTo = %d, want 0 (open)", prices[1].EffectiveTo)
+	}
+	if prices[0].EffectiveTo != prices[1].EffectiveFrom {
+		t.Errorf("stored windows don't tile: first.EffectiveTo=%d second.EffectiveFrom=%d", prices[0].EffectiveTo, prices[1].EffectiveFrom)
+	}
+}
+
+// The boundary/edge case a live-store defect could otherwise hide: when the
+// chronologically *first* segment is the one that gets rejected, the sole
+// surviving window must still reach back to 0 ("since forever"), not just
+// to wherever detectSegments happened to start it.
+func TestDeriveModelRates_RejectedFirstSegmentStoredWindowReachesBackToZero(t *testing.T) {
+	st := withDeriveStore(t)
+
+	startMs := time.Now().Add(-10 * 24 * time.Hour).UnixMilli()
+	goodRates := compute.ModelPrices{Input: 1.4, CacheRead: 0.26, Output: 4.4}
+	var bad []deriveMsg
+	for i, m := range deriveSeries(75, startMs, goodRates) {
+		m.Cost = 0.01
+		if i%2 == 0 {
+			m.Cost = 50.0
+		}
+		bad = append(bad, m)
+	}
+	good := deriveSeries(75, startMs+75, goodRates)
+	msgs := append(bad, good...)
+	seedDeriveMessages(t, st, "opencode", "leading-bad-model", msgs)
+
+	results, err := deriveModelRates(context.Background(), st, 30, 5, 1.0, 1.0, 0.1, 15.0, 0, false)
+	if err != nil {
+		t.Fatalf("deriveModelRates: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %+v, want 2 segments", results)
+	}
+	if results[0].Status != "rejected: error" {
+		t.Fatalf("first segment status = %q, want rejected: error", results[0].Status)
+	}
+	if results[1].Status != "stored" {
+		t.Fatalf("second segment status = %q, want stored", results[1].Status)
+	}
+	if results[1].From != 0 {
+		t.Errorf("results[1].From = %d, want 0 — the only surviving window must reach back to the start of time even though detectSegments didn't hand it From=0 itself", results[1].From)
+	}
+
+	prices, err := st.GetModelPrices(context.Background(), derivedProvider("opencode"))
+	if err != nil {
+		t.Fatalf("GetModelPrices: %v", err)
+	}
+	if len(prices) != 1 {
+		t.Fatalf("stored windows = %+v, want 1", prices)
+	}
+	if prices[0].EffectiveFrom != 0 {
+		t.Errorf("EffectiveFrom = %d, want 0", prices[0].EffectiveFrom)
+	}
+	if prices[0].EffectiveTo != 0 {
+		t.Errorf("EffectiveTo = %d, want 0 (open)", prices[0].EffectiveTo)
+	}
+}
