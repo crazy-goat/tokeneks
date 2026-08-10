@@ -5,9 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"hash"
-	"hash/fnv"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -310,65 +307,18 @@ func sessionRequestParts(path, prefix string) (agent, id string, ok bool) {
 	return parts[0], parts[1], true
 }
 
-func writeSessionRevisionPart(h hash.Hash64, path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintf(h, "%s|%d|%d\n", path, info.ModTime().UTC().UnixNano(), info.Size())
-	return nil
-}
-
-func piSessionRevision(fp string) (string, error) {
-	h := fnv.New64a()
-	if err := writeSessionRevisionPart(h, fp); err != nil {
-		return "", err
-	}
-	sessionDir := strings.TrimSuffix(fp, ".jsonl")
-	_ = filepath.WalkDir(sessionDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d == nil || d.IsDir() || filepath.Ext(path) != ".jsonl" || path == fp {
-			return nil
-		}
-		_ = writeSessionRevisionPart(h, path)
-		return nil
-	})
-	return fmt.Sprintf("%x", h.Sum64()), nil
-}
-
-func claudeSessionRevision(fp string) (string, error) {
-	h := fnv.New64a()
-	if err := writeSessionRevisionPart(h, fp); err != nil {
-		return "", err
-	}
-	sessID := strings.TrimSuffix(filepath.Base(fp), ".jsonl")
-	subDir := filepath.Join(filepath.Dir(fp), sessID, "subagents")
-	_ = filepath.WalkDir(subDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d == nil || d.IsDir() || filepath.Ext(path) != ".jsonl" {
-			return nil
-		}
-		_ = writeSessionRevisionPart(h, path)
-		return nil
-	})
-	return fmt.Sprintf("%x", h.Sum64()), nil
-}
-
-func ocSessionRevision(sessionID string) (string, error) {
-	db, err := openOCDB()
-	if err != nil {
-		return "", err
-	}
-	var sessionMax, sessionCount, partMax, partCount int64
-	if err := db.QueryRow(`SELECT ifnull(MAX(time_created), 0), COUNT(*) FROM session WHERE id = ? OR parent_id = ?`, sessionID, sessionID).Scan(&sessionMax, &sessionCount); err != nil {
-		return "", err
-	}
-	if err := db.QueryRow(`SELECT ifnull(MAX(time_created), 0), COUNT(*) FROM part WHERE session_id = ? OR session_id IN (SELECT id FROM session WHERE parent_id = ?)`, sessionID, sessionID).Scan(&partMax, &partCount); err != nil {
-		return "", err
-	}
-	h := fnv.New64a()
-	_, _ = fmt.Fprintf(h, "%s|%d|%d|%d|%d", sessionID, sessionMax, sessionCount, partMax, partCount)
-	return fmt.Sprintf("%x", h.Sum64()), nil
-}
-
+// sessionRevision returns an opaque value that changes whenever the session's
+// data does, so the SSE stream below can poll for "did this change?" without
+// re-rendering the whole detail.
+//
+// It reads the store, not the source files. Each agent used to have its own
+// file-based variant here (hashing the session's mtime/size plus every
+// subagent file, or aggregating MAX(time_created)/COUNT(*) out of OpenCode's
+// DB), but the store became the single read path for the web layer and
+// nothing called them any more: the store's own ingest already advances a
+// revision whenever it re-parses a changed source. Keeping three per-agent
+// hashers alive next to the one function that actually runs only invited
+// fixing a bug in the copy nobody executes.
 func sessionRevision(agent, id string) (string, error) {
 	return sessionRevisionFromStore(context.Background(), agent, id)
 }

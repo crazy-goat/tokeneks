@@ -152,23 +152,6 @@ func TestDashboardWindowMs_MalformedDatesIgnored(t *testing.T) {
 	}
 }
 
-func TestPIStepWebCost_UsesStoredUsageCost(t *testing.T) {
-	step := piSessionStep{
-		Model: "kimi-k2.6",
-		Step: compute.StepData{
-			Input:     399855,
-			CacheRead: 71936711,
-			Output:    150179,
-		},
-		Cost: 12.49045201,
-	}
-
-	got := piStepWebCost(step)
-	if got != step.Cost {
-		t.Fatalf("piStepWebCost() = %v, want stored cost %v", got, step.Cost)
-	}
-}
-
 func TestSessionsStreamBroker_SubscribeBroadcastUnsubscribe(t *testing.T) {
 	b := &sessionsStreamBroker{clients: make(map[chan struct{}]struct{})}
 

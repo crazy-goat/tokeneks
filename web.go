@@ -66,10 +66,6 @@ type WebSession struct {
 	IsSubsession      bool   `json:"isSubsession,omitempty"`
 }
 
-func piStepWebCost(step piSessionStep) float64 {
-	return step.Cost
-}
-
 var sessionsCache struct {
 	mu      sync.Mutex
 	data    []WebSession
