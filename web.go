@@ -71,16 +71,22 @@ func piStepWebCost(step piSessionStep) float64 {
 }
 
 var sessionsCache struct {
-	mu         sync.Mutex
-	data       []WebSession
-	err        error
-	expires    time.Time
-	cachedDays int
+	mu      sync.Mutex
+	data    []WebSession
+	err     error
+	expires time.Time
+	// fromMs/toMs are the exact [fromMs, toMs) window data/err were fetched
+	// for. Keying the cache on this rather than a day count means two
+	// requests only ever share a cache entry when they asked for the exact
+	// same window — see dashboardWindowMs's doc comment for what used to go
+	// wrong keying on a guessed day count instead.
+	fromMs int64
+	toMs   int64
 }
 
-func getCachedSessions(days int) ([]WebSession, error) {
+func getCachedSessions(fromMs, toMs int64) ([]WebSession, error) {
 	sessionsCache.mu.Lock()
-	cached := sessionsCache.cachedDays == days && time.Now().Before(sessionsCache.expires)
+	cached := sessionsCache.fromMs == fromMs && sessionsCache.toMs == toMs && time.Now().Before(sessionsCache.expires)
 	if cached {
 		data := sessionsCache.data
 		err := sessionsCache.err
@@ -89,13 +95,14 @@ func getCachedSessions(days int) ([]WebSession, error) {
 	}
 	sessionsCache.mu.Unlock()
 
-	data, err := gatherWebSessions(days)
+	data, err := gatherWebSessions(fromMs, toMs)
 
 	sessionsCache.mu.Lock()
 	sessionsCache.data = data
 	sessionsCache.err = err
 	sessionsCache.expires = time.Now().Add(30 * time.Second)
-	sessionsCache.cachedDays = days
+	sessionsCache.fromMs = fromMs
+	sessionsCache.toMs = toMs
 	sessionsCache.mu.Unlock()
 
 	return data, err
@@ -141,76 +148,57 @@ var sessionsStreamBrokerInstance = &sessionsStreamBroker{clients: make(map[chan 
 
 func invalidateSessionsCache() {
 	sessionsCache.mu.Lock()
-	sessionsCache.cachedDays = -1
 	sessionsCache.expires = time.Time{}
 	sessionsCache.mu.Unlock()
 	sessionsStreamBrokerInstance.broadcast()
 }
 
-func gatherWebSessions(days int) ([]WebSession, error) {
-	return gatherWebSessionsFromStore(context.Background(), days)
+func gatherWebSessions(fromMs, toMs int64) ([]WebSession, error) {
+	return gatherWebSessionsFromStore(context.Background(), fromMs, toMs)
 }
 
 //go:embed web/detail.html
 var webDetailHTML []byte
 
-func parseWebSessionTime(value string) (time.Time, bool) {
-	if value == "" {
-		return time.Time{}, false
-	}
-	if ts, err := time.Parse("2006-01-02 15:04:05", value); err == nil {
-		return ts, true
-	}
-	if ts, err := time.Parse("2006-01-02 15:04", value); err == nil {
-		return ts, true
-	}
-	return time.Time{}, false
-}
-
-func filterWebSessionsByDateRange(sessions []WebSession, start, end string) []WebSession {
-	if start == "" && end == "" {
-		return sessions
-	}
-	var startTime, endTime time.Time
-	var err error
+// dashboardWindowMs turns the dashboard's --days default and the optional
+// start/end (YYYY-MM-DD) query params from /api/sessions into an explicit
+// [fromMs, toMs) millisecond range over session.last_activity — the same
+// column and comparison aggregateSessionsFromStore uses for the CLI's own
+// --days N, so a dashboard window and the CLI window it's meant to mirror
+// select the exact same sessions instead of two approximations of "the same"
+// window.
+//
+// With no start/end at all, this is exactly the CLI's rolling window for the
+// same days value: fromMs = now-days*24h, unbounded above. Once start and/or
+// end is given, the window becomes calendar-anchored at UTC midnight of each
+// date instead — start/end used to only round-trip through
+// filterWebSessionsByDateRange (an exact, correct filter) after first
+// over-fetching via a *rolling* window guessed to be wide enough
+// (`effectiveDays = daysSinceStart + 2`) to contain it. That guessed number
+// was never justified, and worse, doubled as the sessions cache's key
+// (getCachedSessions), so a request that only differed in `end` — needing a
+// wider or narrower range than a previously cached one — could silently
+// reuse the wrong cached window. Computing the real range once here and
+// threading it through both the fetch and the cache key removes the guess
+// entirely.
+//
+// end is exclusive of the *next* day, i.e. inclusive of all of the named end
+// date — a picked "today" must include everything that happened today, not
+// stop at UTC midnight this morning.
+func dashboardWindowMs(days int, start, end string) (fromMs, toMs int64) {
+	fromMs = time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+	toMs = unboundedToMs
 	if start != "" {
-		startTime, err = time.Parse("2006-01-02", start)
-		if err != nil {
-			return sessions
+		if t, err := time.Parse("2006-01-02", start); err == nil {
+			fromMs = t.UnixMilli()
 		}
 	}
 	if end != "" {
-		endTime, err = time.Parse("2006-01-02", end)
-		if err != nil {
-			return sessions
+		if t, err := time.Parse("2006-01-02", end); err == nil {
+			toMs = t.Add(24 * time.Hour).UnixMilli()
 		}
-		endTime = endTime.Add(24*time.Hour - time.Nanosecond)
 	}
-	filtered := make([]WebSession, 0, len(sessions))
-	for _, s := range sessions {
-		dateTS, dateOK := parseWebSessionTime(s.Date)
-		lastTS, lastOK := parseWebSessionTime(s.LastMessage)
-		if !dateOK && !lastOK {
-			continue
-		}
-		matchesRange := func(ts time.Time) bool {
-			if ts.IsZero() {
-				return false
-			}
-			if !startTime.IsZero() && ts.Before(startTime) {
-				return false
-			}
-			if !endTime.IsZero() && ts.After(endTime) {
-				return false
-			}
-			return true
-		}
-		if !matchesRange(dateTS) && !matchesRange(lastTS) {
-			continue
-		}
-		filtered = append(filtered, s)
-	}
-	return filtered
+	return fromMs, toMs
 }
 
 func runWeb(port string, days int) error {
@@ -277,21 +265,12 @@ func runWeb(port string, days int) error {
 	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
 		start := r.URL.Query().Get("start")
 		end := r.URL.Query().Get("end")
-		effectiveDays := days
-		if start != "" {
-			if startTime, err := time.Parse("2006-01-02", start); err == nil {
-				effectiveDays = int(time.Since(startTime).Hours()/24) + 2
-				if effectiveDays < 1 {
-					effectiveDays = 1
-				}
-			}
-		}
-		sessions, err := getCachedSessions(effectiveDays)
+		fromMs, toMs := dashboardWindowMs(days, start, end)
+		sessions, err := getCachedSessions(fromMs, toMs)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		sessions = filterWebSessionsByDateRange(sessions, start, end)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "private, max-age=30")
 		json.NewEncoder(w).Encode(sessions)

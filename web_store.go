@@ -50,18 +50,45 @@ func agentDisplayName(agent string) string {
 	return agent
 }
 
+// unboundedToMs is the upper bound of a [fromMs, toMs) session window when
+// the caller wants no upper limit at all — mirrors aggregateSessionsFromStore's
+// own `last_activity >= cutoff` query (no upper bound), which is what the
+// CLI's --days N has always meant: "N days ago through now", never "N days
+// ago through some earlier now". session.last_activity is stored in
+// MILLISECONDS (UnixMilli), never seconds — every fromMs/toMs value flowing
+// into these queries must be milliseconds too, or it silently matches every
+// row (or none).
+const unboundedToMs = int64(math.MaxInt64)
+
 // gatherWebSessionsFromStore returns the list of sessions to display in the
-// web dashboard, computed entirely from the local store.
+// web dashboard, computed entirely from the local store, restricted to
+// sessions whose last_activity falls in [fromMs, toMs).
+//
+// This used to take a `days int` and derive its own rolling cutoff
+// (`time.Now().Add(-days*24h)`), same formula as aggregateSessionsFromStore's
+// CLI-side cutoff. That was fine for the CLI's own --days N flag, but the web
+// dashboard's date picker sends calendar start/end dates, not a day count —
+// the handler (web.go) used to paper over the mismatch by picking a rolling
+// `days` value guessed to be "wide enough" to cover the requested calendar
+// range, then filtering the (over-fetched) result down to the exact range in
+// Go. That meant a calendar-day request and the CLI's rolling-day request for
+// "the same" window could disagree on which sessions were in it, and the
+// session cache (keyed on that guessed day count) could hand back a window
+// narrower than the one actually requested. Taking an explicit millisecond
+// range here instead removes the guesswork: the caller (web.go) decides the
+// range — rolling for the CLI-equivalent default view, calendar-anchored once
+// the user picks dates — and this function (and everything it calls) just
+// honors it.
+//
 // Sessions with no messages are excluded: the watcher keeps them in the
 // store purely as a mtime-filter baseline (so the watcher doesn't keep
 // re-parsing them on every poll), but they're never meant to surface in
 // any list — see ingest/watcher.go reingestRef.
-func gatherWebSessionsFromStore(ctx context.Context, days int) ([]WebSession, error) {
+func gatherWebSessionsFromStore(ctx context.Context, fromMs, toMs int64) ([]WebSession, error) {
 	st := getTokeneksStore()
 	if st == nil {
 		return nil, fmt.Errorf("store not open")
 	}
-	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
 
 	rows, err := st.DB().QueryContext(ctx, `
 		SELECT
@@ -75,12 +102,12 @@ func gatherWebSessionsFromStore(ctx context.Context, days int) ([]WebSession, er
 		  COUNT(CASE WHEN m.role='assistant' THEN 1 END) AS msg_count
 		FROM session s
 		LEFT JOIN message m ON m.agent = s.agent AND m.session_id = s.session_id
-		WHERE s.last_activity >= ?
+		WHERE s.last_activity >= ? AND s.last_activity < ?
 		  AND EXISTS (SELECT 1 FROM message m2
 		              WHERE m2.agent = s.agent AND m2.session_id = s.session_id)
 		GROUP BY s.agent, s.session_id
 		ORDER BY s.last_activity DESC
-	`, cutoff)
+	`, fromMs, toMs)
 	if err != nil {
 		return nil, err
 	}
@@ -130,15 +157,11 @@ func gatherWebSessionsFromStore(ctx context.Context, days int) ([]WebSession, er
 		return []WebSession{}, nil
 	}
 
-	// Per-model, tool-count and child-count are computed for ALL sessions in
-	// the DB (filtered by date) and joined in Go. Passing a per-session
+	// Tool-count and child-count are computed for ALL sessions in the DB
+	// (filtered by date) and joined in Go. Passing a per-session
 	// `(agent=?, session_id=?) OR ...` list with hundreds of keys was the
 	// reason "last 30 days" used to run for many seconds.
-	perModel, err := perModelUsage(ctx, st, cutoff)
-	if err != nil {
-		return nil, err
-	}
-	toolCounts, err := toolCallCounts(ctx, st, cutoff)
+	toolCounts, err := toolCallCounts(ctx, st, fromMs, toMs)
 	if err != nil {
 		return nil, err
 	}
@@ -147,14 +170,18 @@ func gatherWebSessionsFromStore(ctx context.Context, days int) ([]WebSession, er
 		return nil, err
 	}
 	// One bulk query for every step of every session in the window, same
-	// reasoning as perModel/toolCounts/childCounts above: a per-session
-	// query here (one per key) is exactly the N+1 pattern that made this
-	// page slow before, just relocated to the ideal-cache computation.
-	stepsByKey, err := sessionStepsForPricing(ctx, st, cutoff)
+	// reasoning as toolCounts/childCounts above: a per-session query here
+	// (one per key) is exactly the N+1 pattern that made this page slow
+	// before, just relocated to the ideal-cache computation. perModelUsage
+	// reuses this same per-step data (see its own doc comment) so the
+	// per-model breakdown and the session total can never source their
+	// numbers from two different places.
+	stepsByKey, err := sessionStepsForPricing(ctx, st, fromMs, toMs)
 	if err != nil {
 		return nil, err
 	}
 	specsByAgent := buildPricingSpecs()
+	perModel := perModelUsage(stepsByKey, specsByAgent)
 
 	out := make([]WebSession, 0, len(keys))
 	for _, k := range keys {
@@ -206,20 +233,20 @@ func applySessionPricing(ws *WebSession, steps []sessionStep, spec agentPricingS
 	}
 }
 
-// sessionStepsForPricing returns, for every session active within the
-// cutoff window, the same per-step data (model, tokens, logged cost,
-// created-at) computeSessionPricing needs — across every agent in one
+// sessionStepsForPricing returns, for every session active within
+// [fromMs, toMs), the same per-step data (model, provider, tokens, logged
+// cost, created-at) computeSessionPricing needs — across every agent in one
 // query, so callers over the whole dashboard's session list don't pay for
 // one round trip per session.
-func sessionStepsForPricing(ctx context.Context, st *store.Store, cutoffMs int64) (map[sessKey][]sessionStep, error) {
+func sessionStepsForPricing(ctx context.Context, st *store.Store, fromMs, toMs int64) (map[sessKey][]sessionStep, error) {
 	rows, err := st.DB().QueryContext(ctx, `
-		SELECT m.agent, m.session_id, COALESCE(m.model, ''), m.cost, m.created_at,
+		SELECT m.agent, m.session_id, COALESCE(m.model, ''), COALESCE(m.provider, ''), m.cost, m.created_at,
 		       m.input_tokens, m.cache_read, m.cache_write, m.cache_write_1h, m.output_tokens
 		FROM message m
 		JOIN session s ON s.agent = m.agent AND s.session_id = m.session_id
-		WHERE m.role = 'assistant' AND s.last_activity >= ?
+		WHERE m.role = 'assistant' AND s.last_activity >= ? AND s.last_activity < ?
 		ORDER BY m.agent, m.session_id, m.msg_index ASC
-	`, cutoffMs)
+	`, fromMs, toMs)
 	if err != nil {
 		return nil, err
 	}
@@ -227,16 +254,17 @@ func sessionStepsForPricing(ctx context.Context, st *store.Store, cutoffMs int64
 
 	out := make(map[sessKey][]sessionStep)
 	for rows.Next() {
-		var agent, id, model string
+		var agent, id, model, provider string
 		var cost float64
 		var createdAt int64
 		var in, cr, cw, cw1h, o int
-		if err := rows.Scan(&agent, &id, &model, &cost, &createdAt, &in, &cr, &cw, &cw1h, &o); err != nil {
+		if err := rows.Scan(&agent, &id, &model, &provider, &cost, &createdAt, &in, &cr, &cw, &cw1h, &o); err != nil {
 			return nil, err
 		}
 		k := sessKey{agent, id}
 		out[k] = append(out[k], sessionStep{
 			Model:      model,
+			Provider:   provider,
 			LoggedCost: cost,
 			CreatedAt:  createdAt,
 			Data:       compute.StepData{Input: in, CacheRead: cr, CacheCreation: cw, CacheCreation1h: cw1h, Output: o},
@@ -247,62 +275,76 @@ func sessionStepsForPricing(ctx context.Context, st *store.Store, cutoffMs int64
 
 type sessKey struct{ agent, id string }
 
-func perModelUsage(ctx context.Context, st *store.Store, cutoffMs int64) (map[sessKey][]WebModelUsage, error) {
-	rows, err := st.DB().QueryContext(ctx, `
-		SELECT m.agent, m.session_id, m.model, COALESCE(m.provider, ''),
-		       COALESCE(SUM(m.input_tokens),  0),
-		       COALESCE(SUM(m.output_tokens), 0),
-		       COALESCE(SUM(m.cache_read),    0),
-		       COALESCE(SUM(m.cache_write),   0),
-		       COALESCE(SUM(m.cost),          0),
-		       COUNT(m.id)
-		FROM message m
-		JOIN session s ON s.agent = m.agent AND s.session_id = m.session_id
-		WHERE m.role = 'assistant' AND s.last_activity >= ?
-		GROUP BY m.agent, m.session_id, m.model
-	`, cutoffMs)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+// perModelUsage groups each session's already-ordered steps (stepsByKey,
+// from sessionStepsForPricing) by model and prices them through
+// computeSessionPricing — the same engine applySessionPricing uses for the
+// session-level Paid — so a session's per-model Cost rows always sum to
+// exactly that session's own TotalCost.
+//
+// This used to instead run its own SQL query summing the store's logged
+// cost column (SUM(m.cost)) grouped by (agent, session_id, model). That
+// column is a fine source of truth for PI and OpenCode, which log the
+// provider's real bill per message, but for Claude it's tokeneks' own
+// ingest-time recomputation — it goes stale the moment `prices
+// update`/`prices derive` changes a rate, and the session-level Paid shown
+// right above these rows in the dashboard is always the freshly recomputed
+// figure (applySessionPricing), not that stale column. Reusing stepsByKey
+// rather than re-querying also keeps the two totals sourced from identical
+// per-step data instead of two independent queries that could drift apart.
+//
+// A step whose model has no resolvable rate is priced the same way
+// computeSessionPricing prices it at the session level: at its logged cost
+// (zero overpay) when the agent logs one, at 0 when it doesn't — see
+// stepPricing's own doc comment and unpricedModel in main.go.
+func perModelUsage(stepsByKey map[sessKey][]sessionStep, specsByAgent map[string]agentPricingSpec) map[sessKey][]WebModelUsage {
 	out := make(map[sessKey][]WebModelUsage)
-	for rows.Next() {
-		var (
-			agent, id, model, provider string
-			inT, outT, cr, cw          int
-			cost                       float64
-			count                      int
-		)
-		if err := rows.Scan(&agent, &id, &model, &provider, &inT, &outT, &cr, &cw, &cost, &count); err != nil {
-			return nil, err
+	for k, steps := range stepsByKey {
+		if len(steps) == 0 {
+			continue
 		}
-		k := sessKey{agent, id}
-		out[k] = append(out[k], WebModelUsage{
-			Model: model, Provider: provider,
-			Input: inT, Output: outT, CacheRead: cr, CacheWrite: cw,
-			Cost: cost, Messages: count,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for k := range out {
-		models := out[k]
+		spec, ok := specsByAgent[k.agent]
+		if !ok {
+			continue
+		}
+		stepPrices := computeSessionPricing(steps, spec.ClaudeStyle, spec.CostIsLogged, spec.PriceFunc)
+
+		byModel := make(map[string]*WebModelUsage)
+		var order []string
+		for i, sp := range stepPrices {
+			s := steps[i]
+			mu, exists := byModel[sp.Model]
+			if !exists {
+				mu = &WebModelUsage{Model: sp.Model, Provider: s.Provider}
+				byModel[sp.Model] = mu
+				order = append(order, sp.Model)
+			}
+			mu.Input += s.Data.Input
+			mu.Output += s.Data.Output
+			mu.CacheRead += s.Data.CacheRead
+			mu.CacheWrite += s.Data.CacheCreation
+			mu.Cost += sp.Paid
+			mu.Messages++
+		}
+
+		models := make([]WebModelUsage, 0, len(order))
+		for _, m := range order {
+			models = append(models, *byModel[m])
+		}
 		sort.Slice(models, func(i, j int) bool { return models[i].Cost > models[j].Cost })
 		out[k] = models
 	}
-	return out, nil
+	return out
 }
 
-func toolCallCounts(ctx context.Context, st *store.Store, cutoffMs int64) (map[sessKey]int, error) {
+func toolCallCounts(ctx context.Context, st *store.Store, fromMs, toMs int64) (map[sessKey]int, error) {
 	rows, err := st.DB().QueryContext(ctx, `
 		SELECT m.agent, m.session_id, COUNT(tc.id)
 		FROM message m
 		JOIN session s ON s.agent = m.agent AND s.session_id = m.session_id
 		LEFT JOIN tool_call tc ON tc.message_id = m.id
-		WHERE m.role = 'assistant' AND s.last_activity >= ?
+		WHERE m.role = 'assistant' AND s.last_activity >= ? AND s.last_activity < ?
 		GROUP BY m.agent, m.session_id
-	`, cutoffMs)
+	`, fromMs, toMs)
 	if err != nil {
 		return nil, err
 	}
@@ -753,6 +795,12 @@ func buildPricingSpecs() map[string]agentPricingSpec {
 // about model naming or about agents that report their own totals.
 type sessionStep struct {
 	Model string
+	// Provider is only populated when the caller queried for it
+	// (sessionStepsForPricing does; aggregateSessionsFromStore's per-step
+	// query doesn't, since none of its callers need it). It exists purely
+	// so perModelUsage can carry a WebModelUsage.Provider through the same
+	// repricing pass that produces Cost, instead of a second query.
+	Provider string
 	// LoggedCost is the cost the agent's own log reported for this message,
 	// or 0 when it reported none. Only PI and OpenCode log a real
 	// provider-billed figure; for Claude this is tokeneks' own ingest-time

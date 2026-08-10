@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"tokeneks/compute"
 	"tokeneks/store"
 
@@ -55,26 +56,45 @@ func TestHandleAPISessionStream_BadPath_Returns400(t *testing.T) {
 	}
 }
 
-func TestFilterWebSessionsByDateRange_UsesDateOrLastMessage(t *testing.T) {
-	sessions := []WebSession{
-		{ID: "date-only", Date: "2026-06-11 10:00", LastMessage: "2026-06-10 09:00"},
-		{ID: "last-only", Date: "2026-06-09 10:00", LastMessage: "2026-06-11 18:30:00"},
-		{ID: "outside", Date: "2026-06-01 10:00", LastMessage: "2026-06-01 11:00:00"},
+// dashboardWindowMs is what /api/sessions uses to turn start/end into the
+// [fromMs, toMs) range handed to the store layer — see its doc comment for
+// why this replaced the old rolling-window-plus-Go-side-filter approach.
+func TestDashboardWindowMs_CalendarAnchoredWhenStartEndGiven(t *testing.T) {
+	fromMs, toMs := dashboardWindowMs(7, "2026-06-01", "2026-06-03")
+
+	wantFrom := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	wantTo := time.Date(2026, 6, 4, 0, 0, 0, 0, time.UTC).UnixMilli() // exclusive: all of June 3rd included
+	if fromMs != wantFrom {
+		t.Errorf("fromMs = %d, want %d", fromMs, wantFrom)
+	}
+	if toMs != wantTo {
+		t.Errorf("toMs = %d, want %d", toMs, wantTo)
 	}
 
-	filtered := filterWebSessionsByDateRange(sessions, "2026-06-11", "2026-06-11")
-	if len(filtered) != 2 {
-		t.Fatalf("filterWebSessionsByDateRange() len=%d, want 2", len(filtered))
+	// A message that landed at 23:59:59 on the end date must fall inside
+	// the window — this is exactly the milliseconds-vs-seconds and
+	// inclusive-end mistake the store's last_activity comparisons must not
+	// make.
+	lastMomentOfEndDate := time.Date(2026, 6, 3, 23, 59, 59, 0, time.UTC).UnixMilli()
+	if !(lastMomentOfEndDate >= fromMs && lastMomentOfEndDate < toMs) {
+		t.Errorf("23:59:59 on the end date is not inside [%d, %d)", fromMs, toMs)
 	}
-	seen := map[string]bool{}
-	for _, s := range filtered {
-		seen[s.ID] = true
+}
+
+// With no start/end at all, the dashboard's window must be the exact same
+// rolling formula the CLI uses for --days N (aggregateSessionsFromStore's
+// own cutoff) — that parity is the whole point of Issue 1: "last N days"
+// must mean the same session set in both places.
+func TestDashboardWindowMs_RollingWhenNoStartEnd(t *testing.T) {
+	before := time.Now().Add(-7 * 24 * time.Hour).UnixMilli()
+	fromMs, toMs := dashboardWindowMs(7, "", "")
+	after := time.Now().Add(-7 * 24 * time.Hour).UnixMilli()
+
+	if fromMs < before || fromMs > after {
+		t.Errorf("fromMs = %d, want within [%d, %d]", fromMs, before, after)
 	}
-	if !seen["date-only"] || !seen["last-only"] {
-		t.Fatalf("filterWebSessionsByDateRange() missing expected sessions: %+v", seen)
-	}
-	if seen["outside"] {
-		t.Fatalf("filterWebSessionsByDateRange() included out-of-range session")
+	if toMs != unboundedToMs {
+		t.Errorf("toMs = %d, want unbounded (%d)", toMs, unboundedToMs)
 	}
 }
 
@@ -275,7 +295,8 @@ func TestGatherWebSessionsFromStore_AgreesWithTotalsByAgent(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	webSessions, err := gatherWebSessionsFromStore(ctx, 30)
+	fromMs, toMs := time.Now().Add(-30*24*time.Hour).UnixMilli(), unboundedToMs
+	webSessions, err := gatherWebSessionsFromStore(ctx, fromMs, toMs)
 	if err != nil {
 		t.Fatalf("gatherWebSessionsFromStore: %v", err)
 	}
@@ -357,7 +378,7 @@ func TestGatherWebSessionsFromStore_FlagsPartiallyUnpriced(t *testing.T) {
 		step("fake-model-no-price-xyz", 2000, 0, 100), // no rate, no logged cost
 	})
 
-	sessions, err := gatherWebSessionsFromStore(context.Background(), 30)
+	sessions, err := gatherWebSessionsFromStore(context.Background(), time.Now().Add(-30*24*time.Hour).UnixMilli(), unboundedToMs)
 	if err != nil {
 		t.Fatalf("gatherWebSessionsFromStore: %v", err)
 	}
