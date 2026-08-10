@@ -414,6 +414,181 @@ func TestResolveAgentPrices_NoTimestampResolvesNow(t *testing.T) {
 	}
 }
 
+// A historical lookup (resolveAgentPricesAt with a real past timestamp) that
+// resolves through an undated layer — models.dev here — must warn: that
+// layer only ever states today's rate, and using it for a message from long
+// ago is exactly the silent anachronism that masked GPT 5.6 Luna's gap.
+func TestWarnAnachronisticCatalogPrice_FiresForHistoricalLookup(t *testing.T) {
+	st := withTempStore(t)
+	buf := captureResolveWarnings(t)
+
+	err := st.UpsertModelPrices(context.Background(), []store.ModelPrice{
+		{Provider: "opencode", Model: "anach-model", Input: 1.0, Output: 1.0, Source: priceSourceModelsDev, UpdatedAt: 1},
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	resetResolvedPrices()
+
+	old := time.Now().Add(-90 * 24 * time.Hour).UnixMilli()
+	p, ok := resolveAgentPricesAt("opencode", "anach-model", old)
+	if !ok || p.Input != 1.0 {
+		t.Fatalf("got %+v, ok=%v, want the models.dev row to still resolve", p, ok)
+	}
+	if !strings.Contains(buf.String(), "anach-model") || !strings.Contains(buf.String(), "models.dev") {
+		t.Errorf("expected an anachronism warning naming the model and source, got: %s", buf.String())
+	}
+}
+
+// resolveAgentPricesSource's own "now" lookup must never trigger the
+// anachronism warning: it is deliberately asking for today's rate from an
+// undated layer and getting exactly that, not being fooled into thinking a
+// stale rate applies to an old message.
+func TestWarnAnachronisticCatalogPrice_SilentForNowLookup(t *testing.T) {
+	st := withTempStore(t)
+	buf := captureResolveWarnings(t)
+
+	err := st.UpsertModelPrices(context.Background(), []store.ModelPrice{
+		{Provider: "opencode", Model: "now-model", Input: 1.0, Output: 1.0, Source: priceSourceModelsDev, UpdatedAt: 1},
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	resetResolvedPrices()
+
+	if _, ok := resolveAgentPrices("opencode", "now-model"); !ok {
+		t.Fatal("expected the models.dev row to resolve")
+	}
+	if buf.String() != "" {
+		t.Errorf("expected no anachronism warning for a 'now' lookup, got: %s", buf.String())
+	}
+}
+
+// A historical lookup that resolves through the derived layer must not warn
+// — derived rates are dated (see agentPriceWindow) and are exactly the
+// mechanism this warning exists to push people toward, not a case of it.
+func TestWarnAnachronisticCatalogPrice_SilentForDerivedSource(t *testing.T) {
+	st := withTempStore(t)
+	buf := captureResolveWarnings(t)
+
+	err := st.UpsertModelPrices(context.Background(), []store.ModelPrice{
+		{Provider: derivedProvider("opencode"), Model: "derived-model", Input: 1.0, Output: 1.0, Source: priceSourceDerived, UpdatedAt: 1, EffectiveFrom: 0, EffectiveTo: 0},
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	resetResolvedPrices()
+
+	old := time.Now().Add(-90 * 24 * time.Hour).UnixMilli()
+	if _, ok := resolveAgentPricesAt("opencode", "derived-model", old); !ok {
+		t.Fatal("expected the derived row to resolve")
+	}
+	if buf.String() != "" {
+		t.Errorf("expected no anachronism warning for a derived-source resolution, got: %s", buf.String())
+	}
+}
+
+// A repeated historical lookup of the same (agent, model, source) must warn
+// exactly once per process — `total`/`prices check` can run this path once
+// per message, and a single stale model must not flood stderr.
+func TestWarnAnachronisticCatalogPrice_WarnsOncePerKey(t *testing.T) {
+	st := withTempStore(t)
+	buf := captureResolveWarnings(t)
+
+	err := st.UpsertModelPrices(context.Background(), []store.ModelPrice{
+		{Provider: "opencode", Model: "repeat-anach-model", Input: 1.0, Output: 1.0, Source: priceSourceModelsDev, UpdatedAt: 1},
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	resetResolvedPrices()
+
+	old := time.Now().Add(-90 * 24 * time.Hour).UnixMilli()
+	for i := 0; i < 5; i++ {
+		if _, ok := resolveAgentPricesAt("opencode", "repeat-anach-model", old); !ok {
+			t.Fatal("expected a price")
+		}
+	}
+	if got := strings.Count(buf.String(), "repeat-anach-model"); got != 1 {
+		t.Errorf("warning printed %d time(s), want 1: %s", got, buf.String())
+	}
+}
+
+// End-to-end regression for the real case that motivated
+// warnAnachronisticCatalogPrice: opencode's "GPT 5.6 Sol" has only 37
+// logged-cost messages ever (its entire lifetime, all within one six-minute
+// window), and its cache_write column — real token volume, but a true rate
+// small enough that its dollar contribution to the fit lands at ~0.01% of
+// the total, nowhere near minColumnSharePct's 1% floor — correctly fails
+// the identifiability gate and rejects the whole segment (see
+// TestDeriveModelRates_RejectsUnidentifiedColumn for the mechanism itself).
+// With no derived rate stored, a historical lookup for that model falls
+// through to models.dev, and must now warn about it rather than silently
+// trusting an undated catalog rate for a message from long ago — that
+// silent trust is what let this exact model's Ideal cost be ~60% off with
+// nothing in the output to say why.
+func TestResolveAgentPricesAt_UnidentifiedColumnFallsBackToModelsDevWithWarning(t *testing.T) {
+	st := withDeriveStore(t)
+	buf := captureResolveWarnings(t)
+
+	// cache_read carries the bulk of the fitted cost; cache_write varies
+	// for real (so it's not pre-filter pinned) but its true rate is tiny
+	// next to cache_read and output — the same shape measured for GPT 5.6
+	// Sol's real data (cache_write share came out at 0.013%, not a
+	// rounding artifact sitting at the 1% boundary).
+	const trueCacheRead, trueCacheWrite, trueOutput = 0.55, 0.001, 34.6
+	type tok struct{ cr, cw, out int }
+	toks := []tok{
+		{10948, 200, 19}, {2369, 300, 102}, {4947, 150, 103}, {607, 900, 165},
+		{229, 100, 231}, {10607, 700, 113}, {323, 2000, 287}, {10072, 50, 2014},
+		{2170, 900, 172}, {8188, 250, 136}, {360, 1500, 62}, {371, 400, 186},
+		{8485, 1800, 61}, {186, 600, 194}, {491, 1100, 1573}, {1892, 220, 496},
+		{527, 1700, 145}, {613, 90, 193}, {275, 980, 110}, {45, 310, 324},
+		{480, 1600, 86}, {96, 470, 170}, {50, 130, 160}, {1, 90, 112},
+		{455, 200, 19}, {130, 300, 393}, {15577, 150, 131}, {1, 900, 233},
+		{10823, 250, 217}, {386, 1500, 381}, {12643, 400, 99}, {128, 1800, 84},
+		{99, 600, 178}, {790, 1100, 82}, {769, 220, 269}, {1731, 1700, 140}, {187, 90, 33},
+	}
+	startMs := time.Now().Add(-90 * 24 * time.Hour).UnixMilli()
+	var msgs []deriveMsg
+	for i, tk := range toks {
+		cost := float64(tk.cr)*trueCacheRead/compute.TokensPerMillion +
+			float64(tk.cw)*trueCacheWrite/compute.TokensPerMillion +
+			float64(tk.out)*trueOutput/compute.TokensPerMillion
+		msgs = append(msgs, deriveMsg{CacheRead: tk.cr, CacheWrite: tk.cw, Output: tk.out, Cost: cost, CreatedAt: startMs + int64(i)*1000})
+	}
+	seedDeriveMessages(t, st, "opencode", "collinear-cache-model", msgs)
+
+	results, err := deriveModelRates(context.Background(), st, 3650, 20, 35.0, 1.0, 0.1, 15.0, 0, false)
+	if err != nil {
+		t.Fatalf("deriveModelRates: %v", err)
+	}
+	if len(results) != 1 || !strings.HasPrefix(results[0].Status, "rejected: unidentified") {
+		t.Fatalf("results = %+v, want a single rejected-unidentified entry (cache_write's share %.4f%%)",
+			results, results[0].Fit.Columns[2].SharePct)
+	}
+	if prices, err := st.GetModelPrices(context.Background(), derivedProvider("opencode")); err != nil || len(prices) != 0 {
+		t.Fatalf("an unidentified fit must not be stored, even partially: prices=%+v err=%v", prices, err)
+	}
+
+	// With nothing derived, seed a models.dev row (as `prices update` would
+	// have synced) and resolve at the messages' own, historical timestamp.
+	if err := st.UpsertModelPrices(context.Background(), []store.ModelPrice{
+		{Provider: "opencode", Model: "collinear-cache-model", Input: 1.0, Output: 50.0, Source: priceSourceModelsDev, UpdatedAt: 1},
+	}); err != nil {
+		t.Fatalf("seed models.dev: %v", err)
+	}
+	resetResolvedPrices()
+
+	p, ok := resolveAgentPricesAt("opencode", "collinear-cache-model", startMs)
+	if !ok || p.Output != 50.0 {
+		t.Fatalf("got %+v, ok=%v, want the models.dev fallback (Output=50.0)", p, ok)
+	}
+	if !strings.Contains(buf.String(), "collinear-cache-model") || !strings.Contains(buf.String(), "models.dev") {
+		t.Errorf("expected an anachronism warning naming the model and the models.dev source, got: %s", buf.String())
+	}
+}
+
 // The dated derived layer is memoized the same way the rest of
 // resolvedPrices is (see TestResolvedPrices_MemoizedUntilReset): a window
 // inserted after the first lookup must not become visible until

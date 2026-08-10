@@ -21,7 +21,15 @@ var resolveWarnOut io.Writer = os.Stderr
 
 var (
 	agentPriceWarnMu sync.Mutex
-	agentPriceWarned = map[string]bool{} // key: agent + "\x00" + model
+	// agentPriceWarned holds two independent kinds of key in one map/mutex —
+	// warnNoAgentPrice's "agent\x00model" and warnAnachronisticCatalogPrice's
+	// "anach\x00agent\x00model\x00source" (the "anach\x00" prefix can't
+	// collide with the plain form, since no agent name contains a NUL
+	// byte). One map keeps resetAgentPriceWarnings a single call for tests
+	// instead of two, and both warnings are about the same underlying
+	// problem — this resolver being asked for a rate it can't really back
+	// up — so sharing the dedup plumbing costs nothing.
+	agentPriceWarned = map[string]bool{}
 )
 
 // warnNoAgentPrice prints one warning per (agent, model) per process. Both
@@ -37,12 +45,61 @@ func warnNoAgentPrice(agent, model string) {
 		return
 	}
 	agentPriceWarned[key] = true
-	fmt.Fprintf(resolveWarnOut, "warning: no price for %s model %q; its tokens are excluded from cost\n", agent, model)
+	// Deliberately vague about the consequence: this resolver serves several
+	// commands that handle a missing rate differently (`total` keeps a logged
+	// cost and only loses the ideal, others drop the step entirely), so a
+	// specific claim here would be wrong somewhere.
+	fmt.Fprintf(resolveWarnOut, "warning: no price for %s model %q; its tokens cannot be priced\n", agent, model)
+}
+
+// anachronismTolerance bounds how close a lookup's "at" must be to the
+// moment of the call to count as resolveAgentPricesSource's own "now" rather
+// than a genuinely historical lookup (resolveAgentPricesAt, or prices_check's
+// per-message resolution). resolveAgentPricesSource always takes a fresh
+// time.Now() at the moment of the call — never cached — so the true gap
+// between that "now" and the check below is at most the cost of one map
+// lookup; a minute is generous headroom without letting a real historical
+// timestamp slip under it by accident.
+const anachronismTolerance = time.Minute
+
+// warnAnachronisticCatalogPrice reports, once per (agent, model, source) per
+// process, that a historical lookup resolved through an undated layer —
+// models.dev's catalog, OC's builtin table, or PI's live
+// ~/.pi/agent/models.json — none of which carry price history; they only
+// ever state today's rate. That's a silent, materially wrong assumption for
+// a model whose price changed since the message was logged (the case that
+// motivated this: GPT 5.6 Luna was resolving through models.dev's *current*
+// catalog rate for a period where the real rate — visible in derived
+// segments once enough data existed — was several times higher). A
+// deliberate "now" lookup (resolveAgentPricesSource, e.g. `prices check`'s
+// claude rows, or any other dateless caller) is not an anachronism — it is
+// asking for today's rate and getting exactly that — so it is excluded via
+// the anachronismTolerance check rather than by threading a separate flag
+// through every caller.
+func warnAnachronisticCatalogPrice(agent, model, source string, at int64) {
+	diff := time.Since(time.UnixMilli(at))
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff <= anachronismTolerance {
+		return
+	}
+
+	agentPriceWarnMu.Lock()
+	defer agentPriceWarnMu.Unlock()
+	key := "anach\x00" + agent + "\x00" + model + "\x00" + source
+	if agentPriceWarned[key] {
+		return
+	}
+	agentPriceWarned[key] = true
+	fmt.Fprintf(resolveWarnOut,
+		"warning: %s model %q priced via %s for a message from %s; %s has no dated history and states only today's rate, which may not be what applied back then\n",
+		agent, model, source, time.UnixMilli(at).UTC().Format("2006-01-02"), source)
 }
 
 // resetAgentPriceWarnings clears the warned-once set. Test-only — without
-// it, whichever test hits an unknown model first swallows the warning for
-// every later test reusing the same model name.
+// it, whichever test hits an unknown model or an anachronistic-source lookup
+// first swallows the warning for every later test reusing the same key.
 func resetAgentPriceWarnings() {
 	agentPriceWarnMu.Lock()
 	defer agentPriceWarnMu.Unlock()
@@ -331,6 +388,15 @@ func loadResolvedPriceTables() resolvedPriceTables {
 // outside every derived window (a gap between segments, or a model with no
 // accepted segment at all) falls through to them exactly as it would with
 // no timestamp at all.
+//
+// A resolution through one of those undated layers is reported back through
+// the returned source string exactly like any other — callers that keep
+// discarding it (resolveAgentPricesAt, resolveAgentPrices) are not thereby
+// treating it as equally trustworthy: when "at" is a genuine historical
+// timestamp rather than resolveAgentPricesSource's own "now", landing on an
+// undated layer also fires warnAnachronisticCatalogPrice, once per (agent,
+// model, source), so the low confidence is visible on stderr even to a
+// caller that only wanted the price.
 func resolveAgentPricesAtSource(agent, model string, at int64) (compute.ModelPrices, string, bool) {
 	switch agent {
 	case "pi":
@@ -347,6 +413,7 @@ func resolveAgentPricesAtSource(agent, model string, at int64) (compute.ModelPri
 			return p, "derived", true
 		}
 		if p, ok := piPricesFunc()[model]; ok && p.Input > 0 {
+			warnAnachronisticCatalogPrice(agent, model, "catalog", at)
 			return p, "catalog", true
 		}
 		warnNoAgentPrice(agent, model)
@@ -360,12 +427,15 @@ func resolveAgentPricesAtSource(agent, model string, at int64) (compute.ModelPri
 			return p, "derived", true
 		}
 		if p, ok := tbl.ocDevExact[model]; ok && p.Input > 0 {
+			warnAnachronisticCatalogPrice(agent, model, "models.dev", at)
 			return p, "models.dev", true
 		}
 		if p, ok := tbl.ocDevNorm[normalizeModelKey(model)]; ok && p.Input > 0 {
+			warnAnachronisticCatalogPrice(agent, model, "models.dev(norm)", at)
 			return p, "models.dev(norm)", true
 		}
 		if p, ok := ocModelPrices[model]; ok && p.Input > 0 {
+			warnAnachronisticCatalogPrice(agent, model, "builtin", at)
 			return p, "builtin", true
 		}
 		warnNoAgentPrice(agent, model)
