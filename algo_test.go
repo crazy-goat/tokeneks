@@ -117,7 +117,7 @@ func TestComputeIdealClaude_IdealInRemoved(t *testing.T) {
 		t.Fatalf("os.Pipe: %v", err)
 	}
 	os.Stdout = w
-	printDetailRows(rows, prices, true)
+	printDetailRows(rows, uniformDetailPricing(len(rows), "claude-test-model", prices), true)
 	w.Close()
 	os.Stdout = oldStdout
 
@@ -309,5 +309,162 @@ func TestSummarize_ActualMatchesSumOfStepCosts(t *testing.T) {
 
 	if math.Abs(s.Actual-sumStepCosts) > 1e-9 {
 		t.Errorf("Summarize.Actual = %f, sum of step costs = %f", s.Actual, sumStepCosts)
+	}
+}
+
+// Bug: printDetailRows used to take one compute.ModelPrices and price every
+// row with it, so a session that switched models mid-run had every row
+// priced at whichever model was passed in. A session must be priced per
+// row, at each row's own model — and, since ComputeIdealClaude carries
+// state forward step to step, the ideal computation itself must still run
+// once over the whole continuous step order (see totalsByAgent in main.go,
+// the reference implementation this mirrors) rather than being split by
+// model first.
+func TestComputeDetailRowCosts_MixedModelPricedPerRow(t *testing.T) {
+	steps := []compute.StepData{
+		{Input: 20000, Output: 1000}, // served by "model-a"
+		{Input: 20000, Output: 1000}, // served by "model-b", same shape
+	}
+	modelA := compute.ModelPrices{Input: 3.0, Output: 15.0, CacheRead: 0.3}
+	modelB := compute.ModelPrices{Input: 15.0, Output: 75.0, CacheRead: 1.5}
+
+	// One continuous ideal-cache pass over the untouched session order, same
+	// as printDetailRows' callers now do — splitting by model before this
+	// call would drop step 2's carried-forward context from step 1.
+	rows := compute.ComputeIdealClaude(steps, compute.ModelPrices{})
+
+	pricing := []detailRowPrice{
+		{Model: "model-a", Prices: modelA, Priced: true},
+		{Model: "model-b", Prices: modelB, Priced: true},
+	}
+
+	costs, kinds, totals := computeDetailRowCosts(rows, pricing)
+
+	if len(costs) != 2 {
+		t.Fatalf("costs = %+v, want 2 entries", costs)
+	}
+	for i, k := range kinds {
+		if k != detailRowCostRated {
+			t.Errorf("row %d kind = %v, want detailRowCostRated", i, k)
+		}
+	}
+
+	rowStep := func(r compute.IdealRow) compute.StepData {
+		return compute.StepData{Input: r.Input, CacheCreation: r.CacheCreation, CacheCreation1h: r.CacheCreation1h, CacheRead: r.CacheRead, Output: r.Output}
+	}
+	wantRow0 := compute.PiStepActualCost(rowStep(rows[0]), modelA)
+	wantRow1 := compute.PiStepActualCost(rowStep(rows[1]), modelB)
+	if costs[0] != wantRow0 {
+		t.Errorf("row 0 cost = %v, want %v (priced at model-a's own rate)", costs[0], wantRow0)
+	}
+	if costs[1] != wantRow1 {
+		t.Errorf("row 1 cost = %v, want %v (priced at model-b's own rate)", costs[1], wantRow1)
+	}
+
+	sumRows := costs[0] + costs[1]
+
+	// Regression guard: pricing every row at model-a alone, or at model-b
+	// alone, must give a different total than pricing each row at its own
+	// model — otherwise this fixture wouldn't distinguish per-row pricing
+	// from the old single-price bug.
+	allAtA := compute.Summarize(rows, modelA).Actual
+	allAtB := compute.Summarize(rows, modelB).Actual
+	if sumRows == allAtA {
+		t.Errorf("per-row sum %v equals pricing everything at model-a (%v); fixture doesn't distinguish per-row pricing", sumRows, allAtA)
+	}
+	if sumRows == allAtB {
+		t.Errorf("per-row sum %v equals pricing everything at model-b (%v); fixture doesn't distinguish per-row pricing", sumRows, allAtB)
+	}
+
+	// totals.InCost/OutCost/etc are the categorized "$" line; they must add
+	// up to the same per-row sum computed above, at the categories' own
+	// per-row rates.
+	if math.Abs((totals.InCost+totals.CCCost+totals.CRCost+totals.OutCost)-sumRows) > 1e-9 {
+		t.Errorf("categorized totals sum = %v, want %v (sum of per-row costs)", totals.InCost+totals.CCCost+totals.CRCost+totals.OutCost, sumRows)
+	}
+	if totals.LoggedRows != 0 || totals.UnknownRows != 0 {
+		t.Errorf("totals = %+v, want no logged/unknown rows (every row priced)", totals)
+	}
+}
+
+// A row with no resolvable rate must not be dropped or priced at some other
+// row's rate — it falls back to the agent's own logged cost, same
+// preference order as totalsByAgent.
+func TestDetailRowCost_FallsBackToLoggedCostWhenUnpriced(t *testing.T) {
+	row := compute.IdealRow{Input: 5000, CacheRead: 1000, Output: 500}
+	p := detailRowPrice{Model: "retired-model", Priced: false, LoggedCost: 3.25}
+
+	cost, kind := detailRowCost(row, p)
+	if kind != detailRowCostLogged {
+		t.Errorf("kind = %v, want detailRowCostLogged", kind)
+	}
+	if cost != 3.25 {
+		t.Errorf("cost = %v, want 3.25 (the logged cost)", cost)
+	}
+}
+
+// A row with neither a resolvable rate nor a logged cost has a genuinely
+// unknown price — it must read as unknown, not as a fabricated $0.00.
+func TestDetailRowCost_UnknownWhenNoRateAndNoLoggedCost(t *testing.T) {
+	row := compute.IdealRow{Input: 5000, CacheRead: 1000, Output: 500}
+	p := detailRowPrice{Model: "retired-model", Priced: false, LoggedCost: 0}
+
+	cost, kind := detailRowCost(row, p)
+	if kind != detailRowCostUnknown {
+		t.Errorf("kind = %v, want detailRowCostUnknown", kind)
+	}
+	if cost != 0 {
+		t.Errorf("cost = %v, want 0", cost)
+	}
+}
+
+// formatDetailRowCost must mark a logged-cost fallback and an unknown cost
+// differently from a genuine rate-priced figure, so neither is mistaken for
+// a number this program actually computed from a rate table.
+func TestFormatDetailRowCost_MarksLoggedAndUnknown(t *testing.T) {
+	if got := formatDetailRowCost(1.5, detailRowCostRated); got != "$1.5000" {
+		t.Errorf("rated = %q, want %q", got, "$1.5000")
+	}
+	if got := formatDetailRowCost(1.5, detailRowCostLogged); got != "$1.5000~" {
+		t.Errorf("logged = %q, want %q", got, "$1.5000~")
+	}
+	if got := formatDetailRowCost(0, detailRowCostUnknown); got != "n/a" {
+		t.Errorf("unknown = %q, want %q", got, "n/a")
+	}
+}
+
+// The printed table must name the model each row actually used — a table
+// that silently mixes models without saying so is the bug being fixed.
+func TestPrintDetailRows_ShowsPerRowModel(t *testing.T) {
+	steps := []compute.StepData{
+		{Input: 20000, Output: 1000},
+		{Input: 20000, Output: 1000},
+	}
+	rows := compute.ComputeIdealClaude(steps, compute.ModelPrices{})
+	pricing := []detailRowPrice{
+		{Model: "model-cheap", Prices: compute.ModelPrices{Input: 1, Output: 2, CacheRead: 0.1}, Priced: true},
+		{Model: "model-pricey", Prices: compute.ModelPrices{Input: 20, Output: 40, CacheRead: 2}, Priced: true},
+	}
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	printDetailRows(rows, pricing, true)
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "model-cheap") {
+		t.Errorf("output missing model-cheap:\n%s", out)
+	}
+	if !strings.Contains(out, "model-pricey") {
+		t.Errorf("output missing model-pricey:\n%s", out)
 	}
 }

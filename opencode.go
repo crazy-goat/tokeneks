@@ -377,20 +377,21 @@ func ocDetail(sessionID string) error {
 	fmt.Printf("Model:   %s\n\n", model)
 
 	tokenSteps := make([]compute.StepData, len(steps))
+	pricing := make([]detailRowPrice, len(steps))
 	for i, st := range steps {
 		tokenSteps[i] = st.Data
+		p, ok := resolveAgentPrices("opencode", st.Model)
+		pricing[i] = detailRowPrice{Model: st.Model, Prices: p, Priced: ok, LoggedCost: st.LoggedCost}
 	}
 	rows := compute.ComputeIdeal(tokenSteps)
-	// The per-row table is illustrative only — it shows what a single rate
-	// table would have charged row by row, at the session's own dominant
-	// (display) model, not the mix of per-step rates ocSessionSummary
-	// applies below. When that dominant model itself has no price, there is
-	// nothing to illustrate the table with, so it is skipped rather than
-	// blocking the headline figures, which are priced per step and may
-	// still be computable even when the session's own labelled model isn't.
-	if prices, ok := resolveAgentPrices("opencode", model); ok {
-		printDetailRows(rows, prices, false)
-	}
+	// The per-row table is illustrative, but it's no longer priced at the
+	// session's dominant (display) model for every row — OC sessions switch
+	// models mid-run, so it now prices each row at its own step's model,
+	// same as ocSessionSummary below. That headline still isn't derived from
+	// this table (it sums per step directly rather than re-deriving from
+	// printed rows), it's just no longer the odd one out in getting the
+	// per-step rate right.
+	printDetailRows(rows, pricing, false)
 
 	// The headline takes Actual/Ideal/Overpay/%ideal from the per-step
 	// summary, not from the single-rate table above — that's the whole

@@ -570,7 +570,7 @@ func piDetail(input string, days int) error {
 
 		if !prices.SupportsCacheCreation {
 			rows := compute.ComputeIdeal(steps)
-			printDetailRows(rows, prices, false)
+			printDetailRows(rows, uniformDetailPricing(len(rows), model, prices), false)
 			s := compute.Summarize(rows, prices)
 			totalActual += s.Actual
 			totalIdeal += s.Ideal
@@ -579,7 +579,7 @@ func piDetail(input string, days int) error {
 			fmt.Printf("Subtotal overpay: $%.2f (%.1f%% of ideal)\n", s.Overpay, s.PctIdeal)
 		} else {
 			rows := compute.ComputeIdealClaude(steps, prices)
-			printDetailRowsClaude(rows, prices)
+			printDetailRowsClaude(rows, uniformDetailPricing(len(rows), model, prices))
 			s := compute.SummarizeClaude(rows, prices)
 			totalActual += s.Actual
 			totalIdeal += s.Ideal
