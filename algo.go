@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"unicode/utf8"
 
@@ -190,6 +191,136 @@ func printDetailRowFootnotes(t detailTotals) {
 		fmt.Printf("  n/a %d row(s) have no resolvable rate and no logged cost; cost unknown (%s tokens, excluded from every total above)\n",
 			t.UnknownRows, formatTokens(t.UnknownTokens))
 	}
+}
+
+// detailReconMinAbsDelta and detailReconMinPctDelta gate
+// detailCostRecon.Significant: below either floor the observed delta reads
+// as float rounding or a fraction-of-a-cent nit, not a price-table drift
+// worth a reader's attention.
+const (
+	detailReconMinAbsDelta = 0.005 // half a cent
+	detailReconMinPctDelta = 0.5   // 0.5% of the rate-derived total
+)
+
+// detailCostRecon is the measured gap between a detail table's rate-derived
+// total (every row priced strictly from its own resolved rate, ignoring any
+// logged cost — what printDetailRows' rows sum to) and the same rows'
+// logged provider total (each row's own logged cost where OpenCode actually
+// logged one, that row's rate cost otherwise — the same preference
+// ocSessionSummary's headline applies). detailRowCost prefers the rate over
+// the logged cost for the table itself, so once every row in a session
+// resolves a rate — true for every OpenCode model today, per ocModelPrices'
+// doc comment — the logged figure never surfaces in the printed table at
+// all, even though the headline sums it. This type names that gap
+// explicitly rather than leaving the two totals to silently disagree on the
+// same screen.
+//
+// Deliberately agent-agnostic (same detailRowPrice/compute.IdealRow inputs
+// as the rest of this file's detail-table machinery) so pi detail could
+// reconcile the same way once it carries a per-row logged cost worth
+// comparing against; this task only wires it into oc detail.
+type detailCostRecon struct {
+	RatedTotal  float64 // sum of each priced row's own rate-derived cost
+	LoggedTotal float64 // same rows, but using each row's logged cost where one exists (its rate cost otherwise) — exactly what a logged-preferring headline sums
+	CoveredRows int     // priced rows that actually carry a logged cost — the only rows the delta can come from
+	PricedRows  int     // priced rows total (the covered-rows denominator, i.e. the covered fraction)
+}
+
+// Delta is how much more (or less) the logged provider total is than the
+// rate-derived total. Positive means the provider billed more than
+// tokeneks' price table would have.
+func (r detailCostRecon) Delta() float64 { return r.LoggedTotal - r.RatedTotal }
+
+// PctDelta is Delta as a percentage of RatedTotal, 0 when RatedTotal is 0
+// rather than the NaN/Inf a naive division would produce.
+func (r detailCostRecon) PctDelta() float64 {
+	if r.RatedTotal == 0 {
+		return 0
+	}
+	return r.Delta() / r.RatedTotal * 100
+}
+
+// Significant reports whether the drift is worth printing at all. A session
+// where nothing was logged has nothing to reconcile (CoveredRows == 0), and
+// a drift smaller than detailReconMinAbsDelta/detailReconMinPctDelta is more
+// likely float rounding than a real price-table gap. RatedTotal == 0 (a
+// resolved rate that happens to price at exactly $0) skips the percentage
+// check entirely rather than let PctDelta's safe zero fallback hide a real
+// logged cost sitting on top of it.
+func (r detailCostRecon) Significant() bool {
+	if r.CoveredRows == 0 {
+		return false
+	}
+	delta := math.Abs(r.Delta())
+	if delta < detailReconMinAbsDelta {
+		return false
+	}
+	if r.RatedTotal == 0 {
+		return true
+	}
+	return math.Abs(r.PctDelta()) >= detailReconMinPctDelta
+}
+
+// computeDetailCostRecon walks the same rows/pricing printDetailRows prices,
+// summing two totals instead of one: RatedTotal prices every row strictly
+// from its own resolved rate, and LoggedTotal prices the same rows
+// preferring each row's own logged cost — the same preference
+// ocSessionSummary's headline applies. Rows with no resolvable rate at all
+// are excluded from both, mirroring ocSessionSummary's own unpriced-row
+// exclusion (unpriced rows never reach its summary.Actual either), so
+// LoggedTotal here lines up with the headline's Actual figure exactly
+// rather than by coincidence.
+func computeDetailCostRecon(rows []compute.IdealRow, pricing []detailRowPrice) detailCostRecon {
+	var r detailCostRecon
+	for i, row := range rows {
+		var p detailRowPrice
+		if i < len(pricing) {
+			p = pricing[i]
+		}
+		if !p.Priced {
+			continue
+		}
+		r.PricedRows++
+
+		step := compute.StepData{
+			Input: row.Input, CacheCreation: row.CacheCreation, CacheCreation1h: row.CacheCreation1h,
+			CacheRead: row.CacheRead, Output: row.Output,
+		}
+		rated := compute.PiStepActualCost(step, p.Prices)
+		r.RatedTotal += rated
+
+		if p.LoggedCost > 0 {
+			r.CoveredRows++
+			r.LoggedTotal += p.LoggedCost
+		} else {
+			r.LoggedTotal += rated
+		}
+	}
+	return r
+}
+
+// printDetailCostReconciliation prints the gap between the table's
+// rate-derived total and the same rows' logged provider total, but only
+// when that gap is both real (some row actually carries a logged cost) and
+// large enough to matter (see detailReconMinAbsDelta/detailReconMinPctDelta)
+// — a session with nothing logged, or one whose logged total agrees with
+// the rate table within rounding, prints nothing at all, same convention as
+// printDetailRowFootnotes above.
+//
+// This is not an error report: the rate table and the provider's bill
+// measure two different things (tokeneks' own price table vs. what the
+// provider actually billed for the same tokens), and this block exists to
+// name the size of that drift instead of leaving a reader to notice the
+// table's $ sum doesn't match the headline and wonder why.
+func printDetailCostReconciliation(r detailCostRecon) {
+	if !r.Significant() {
+		return
+	}
+	fmt.Println()
+	fmt.Printf("Price-table drift: rate-derived $%.4f vs. logged $%.4f (%+.4f, %+.1f%% of rate-derived)\n",
+		r.RatedTotal, r.LoggedTotal, r.Delta(), r.PctDelta())
+	fmt.Printf("  %d/%d priced rows carried a logged cost; this is measured drift between tokeneks' price table and the provider's actual bill, not an error in either.\n",
+		r.CoveredRows, r.PricedRows)
 }
 
 // rowsHaveCacheCreation reports whether any row actually carries cache-write

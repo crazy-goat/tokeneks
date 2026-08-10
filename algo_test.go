@@ -563,3 +563,194 @@ func TestPrintDetailRows_WidensTable_WhenCallerPassesShowCCFalseButRowsHaveCache
 		t.Errorf("footer is missing the CCCost figure (%s) that the omitted-column table used to drop:\n%s", ccCostStr, out)
 	}
 }
+
+// computeDetailCostRecon: every row priced and every row logged, at a
+// deliberately large logged/rate ratio so a bug that fell back to rate (or
+// vice versa) would show up as an obviously wrong total rather than a
+// rounding difference.
+func TestComputeDetailCostRecon_AllRowsLogged(t *testing.T) {
+	rows := []compute.IdealRow{
+		{Input: 1_000_000, Output: 100_000},
+		{Input: 2_000_000, Output: 200_000},
+	}
+	prices := compute.ModelPrices{Input: 0.95, Output: 4.0}
+	pricing := []detailRowPrice{
+		{Model: "m", Prices: prices, Priced: true, LoggedCost: 10},
+		{Model: "m", Prices: prices, Priced: true, LoggedCost: 20},
+	}
+
+	r := computeDetailCostRecon(rows, pricing)
+
+	wantRated := compute.PiStepActualCost(compute.StepData{Input: rows[0].Input, Output: rows[0].Output}, prices) +
+		compute.PiStepActualCost(compute.StepData{Input: rows[1].Input, Output: rows[1].Output}, prices)
+	if r.RatedTotal != wantRated {
+		t.Errorf("RatedTotal = %v, want %v", r.RatedTotal, wantRated)
+	}
+	if r.LoggedTotal != 30 {
+		t.Errorf("LoggedTotal = %v, want 30 (sum of logged costs)", r.LoggedTotal)
+	}
+	if r.CoveredRows != 2 || r.PricedRows != 2 {
+		t.Errorf("CoveredRows=%d PricedRows=%d, want 2 and 2", r.CoveredRows, r.PricedRows)
+	}
+	if got := r.Delta(); got != 30-wantRated {
+		t.Errorf("Delta() = %v, want %v", got, 30-wantRated)
+	}
+}
+
+// computeDetailCostRecon: a row with no logged cost must fall back to its
+// own rate cost inside LoggedTotal (the same preference ocSessionSummary's
+// headline applies), and must not count toward CoveredRows — the covered
+// fraction the task asks be reported for partial logged coverage.
+func TestComputeDetailCostRecon_PartialLoggedCoverage(t *testing.T) {
+	rows := []compute.IdealRow{
+		{Input: 1_000_000, Output: 100_000}, // logged
+		{Input: 1_000_000, Output: 100_000}, // not logged -> falls back to rate
+	}
+	prices := compute.ModelPrices{Input: 0.95, Output: 4.0}
+	pricing := []detailRowPrice{
+		{Model: "m", Prices: prices, Priced: true, LoggedCost: 50},
+		{Model: "m", Prices: prices, Priced: true, LoggedCost: 0},
+	}
+
+	r := computeDetailCostRecon(rows, pricing)
+
+	rateEach := compute.PiStepActualCost(compute.StepData{Input: 1_000_000, Output: 100_000}, prices)
+	wantLoggedTotal := 50 + rateEach // row 0 logged, row 1 falls back to its own rate
+	if r.LoggedTotal != wantLoggedTotal {
+		t.Errorf("LoggedTotal = %v, want %v (logged row 0 + rate-fallback row 1)", r.LoggedTotal, wantLoggedTotal)
+	}
+	if r.RatedTotal != 2*rateEach {
+		t.Errorf("RatedTotal = %v, want %v (both rows at their own rate)", r.RatedTotal, 2*rateEach)
+	}
+	if r.CoveredRows != 1 {
+		t.Errorf("CoveredRows = %d, want 1 (only row 0 carried a logged cost)", r.CoveredRows)
+	}
+	if r.PricedRows != 2 {
+		t.Errorf("PricedRows = %d, want 2 (both rows had a resolvable rate)", r.PricedRows)
+	}
+}
+
+// computeDetailCostRecon: a row with no resolvable rate must be excluded
+// from both totals entirely (mirroring ocSessionSummary's unpriced-row
+// exclusion), even if it happens to carry a logged cost — there is no rate
+// figure to compare that logged cost against.
+func TestComputeDetailCostRecon_UnpricedRowExcluded(t *testing.T) {
+	rows := []compute.IdealRow{
+		{Input: 1_000_000, Output: 100_000}, // priced
+		{Input: 5_000_000, Output: 500_000}, // unpriced, but logged
+	}
+	prices := compute.ModelPrices{Input: 0.95, Output: 4.0}
+	pricing := []detailRowPrice{
+		{Model: "m", Prices: prices, Priced: true, LoggedCost: 0},
+		{Model: "retired-model", Priced: false, LoggedCost: 99},
+	}
+
+	r := computeDetailCostRecon(rows, pricing)
+
+	wantRated := compute.PiStepActualCost(compute.StepData{Input: rows[0].Input, Output: rows[0].Output}, prices)
+	if r.RatedTotal != wantRated {
+		t.Errorf("RatedTotal = %v, want %v (unpriced row's tokens excluded)", r.RatedTotal, wantRated)
+	}
+	if r.LoggedTotal != wantRated {
+		t.Errorf("LoggedTotal = %v, want %v (unpriced row's $99 logged cost excluded)", r.LoggedTotal, wantRated)
+	}
+	if r.PricedRows != 1 {
+		t.Errorf("PricedRows = %d, want 1", r.PricedRows)
+	}
+	if r.CoveredRows != 0 {
+		t.Errorf("CoveredRows = %d, want 0 (the only logged row has no rate to compare it against)", r.CoveredRows)
+	}
+}
+
+// detailCostRecon.Delta/PctDelta: PctDelta must be a safe 0, not NaN/Inf,
+// when RatedTotal is 0 — the exact "zero denominator" case the task calls
+// out.
+func TestDetailCostRecon_PctDelta_ZeroRatedTotal_IsZeroNotNaN(t *testing.T) {
+	r := detailCostRecon{RatedTotal: 0, LoggedTotal: 5, CoveredRows: 1, PricedRows: 1}
+	if got := r.PctDelta(); got != 0 {
+		t.Errorf("PctDelta() = %v, want 0 when RatedTotal is 0", got)
+	}
+	if math.IsNaN(r.PctDelta()) || math.IsInf(r.PctDelta(), 0) {
+		t.Errorf("PctDelta() = %v, want a finite number", r.PctDelta())
+	}
+}
+
+// detailCostRecon.Significant: no row carried a logged cost at all — there
+// is nothing to reconcile, regardless of what RatedTotal/LoggedTotal happen
+// to hold.
+func TestDetailCostRecon_Significant_NoCoverage_IsFalse(t *testing.T) {
+	r := detailCostRecon{RatedTotal: 10, LoggedTotal: 1000, CoveredRows: 0, PricedRows: 5}
+	if r.Significant() {
+		t.Error("Significant() = true, want false when CoveredRows == 0")
+	}
+}
+
+// detailCostRecon.Significant: a delta below the half-cent absolute floor
+// must not print, even though some row is logged — this is the "agreement
+// within rounding" case the task says must be silent.
+func TestDetailCostRecon_Significant_BelowAbsoluteFloor_IsFalse(t *testing.T) {
+	r := detailCostRecon{RatedTotal: 10.000, LoggedTotal: 10.003, CoveredRows: 1, PricedRows: 1}
+	if r.Significant() {
+		t.Error("Significant() = true, want false for a $0.003 delta (below the half-cent floor)")
+	}
+}
+
+// detailCostRecon.Significant: an absolute delta that clears the cent floor
+// but is a negligible fraction of a large total must still not print — the
+// percentage gate exists precisely so a big session with a tiny relative
+// drift doesn't get flagged.
+func TestDetailCostRecon_Significant_BelowPercentFloor_IsFalse(t *testing.T) {
+	r := detailCostRecon{RatedTotal: 1000.00, LoggedTotal: 1000.40, CoveredRows: 1, PricedRows: 1}
+	if r.PctDelta() >= detailReconMinPctDelta {
+		t.Fatalf("fixture doesn't exercise the percent floor: PctDelta=%v", r.PctDelta())
+	}
+	if r.Significant() {
+		t.Error("Significant() = true, want false when PctDelta is below detailReconMinPctDelta despite a >$0.005 delta")
+	}
+}
+
+// detailCostRecon.Significant: a delta clearing both floors must print.
+func TestDetailCostRecon_Significant_AboveBothFloors_IsTrue(t *testing.T) {
+	r := detailCostRecon{RatedTotal: 10.00, LoggedTotal: 11.00, CoveredRows: 1, PricedRows: 1}
+	if !r.Significant() {
+		t.Error("Significant() = false, want true for a $1.00 / 10% delta")
+	}
+}
+
+// detailCostRecon.Significant: RatedTotal == 0 (a resolved rate that prices
+// at exactly $0) must not hide a real logged cost behind PctDelta's safe
+// zero fallback — the percent check is skipped entirely in that case.
+func TestDetailCostRecon_Significant_ZeroRatedTotal_LoggedPositive_IsTrue(t *testing.T) {
+	r := detailCostRecon{RatedTotal: 0, LoggedTotal: 1.00, CoveredRows: 1, PricedRows: 1}
+	if !r.Significant() {
+		t.Error("Significant() = false, want true: RatedTotal is 0 but a real $1.00 was logged")
+	}
+}
+
+// printDetailCostReconciliation must print nothing at all for an
+// insignificant recon (no noise), and the labelled drift block for a
+// significant one, naming it as drift rather than an error.
+func TestPrintDetailCostReconciliation_SilentUnlessSignificant(t *testing.T) {
+	silent := captureStdout(t, func() {
+		printDetailCostReconciliation(detailCostRecon{RatedTotal: 10, LoggedTotal: 10, CoveredRows: 0, PricedRows: 3})
+	})
+	if silent != "" {
+		t.Errorf("printDetailCostReconciliation printed output for an insignificant recon:\n%s", silent)
+	}
+
+	loud := captureStdout(t, func() {
+		printDetailCostReconciliation(detailCostRecon{RatedTotal: 10.00, LoggedTotal: 11.00, CoveredRows: 3, PricedRows: 5})
+	})
+	if !strings.Contains(loud, "Price-table drift") {
+		t.Errorf("printDetailCostReconciliation output missing the drift label:\n%s", loud)
+	}
+	if !strings.Contains(loud, "not an error") {
+		t.Errorf("printDetailCostReconciliation output must explicitly say this drift is not an error:\n%s", loud)
+	}
+	if !strings.Contains(loud, "3/5") {
+		t.Errorf("printDetailCostReconciliation output missing the covered fraction (3/5):\n%s", loud)
+	}
+	if !strings.Contains(loud, "10.0000") || !strings.Contains(loud, "11.0000") {
+		t.Errorf("printDetailCostReconciliation output missing both totals:\n%s", loud)
+	}
+}

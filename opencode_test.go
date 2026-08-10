@@ -774,3 +774,88 @@ func TestOcList_SessionSpanningTwoModels_PricedPerModel(t *testing.T) {
 		t.Errorf("output contains the whole-session-at-Kimi figure %s, want only the per-model figure %s:\n%s", wrongStr, wantStr, out)
 	}
 }
+
+// TestOcDetail_PrintsReconciliation_WhenLoggedDiffersMeaningfullyFromRate is
+// the end-to-end version of the algo_test.go computeDetailCostRecon unit
+// tests: a real oc detail run on a session whose logged cost is far from
+// what tokeneks' price table would compute for the same tokens must print
+// the "Price-table drift" block after the table, naming both totals — this
+// is the exact divergence the task describes (table sums to the rate,
+// headline sums the logged figure) made visible instead of silent.
+func TestOcDetail_PrintsReconciliation_WhenLoggedDiffersMeaningfullyFromRate(t *testing.T) {
+	withTempStore(t)
+	db := withOCFixtureSessionDB(t)
+
+	now := time.Now().UnixMilli()
+	kimi := ocModelPrices["Kimi K2.6"]
+	rate := compute.PiStepActualCost(compute.StepData{Input: 1_000_000, Output: 100_000}, kimi)
+	logged := rate * 2 // deliberately far from the rate so this can't be mistaken for rounding
+
+	stmts := []string{
+		fmt.Sprintf(`INSERT INTO session (id, title, model, time_created, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, parent_id, cost, project_id) VALUES ('sess-recon', 'Recon', '{"id":"Kimi K2.6","providerID":"kimi"}', %d, 0, 0, 0, 0, '', 0, '');`, now),
+		`INSERT INTO message (id, data) VALUES ('msg-recon', '{"modelID":"Kimi K2.6"}');`,
+		fmt.Sprintf(`INSERT INTO part (session_id, time_created, message_id, data) VALUES ('sess-recon', %d, 'msg-recon', '{"type":"step-finish","cost":%f,"tokens":{"input":1000000,"output":100000,"cache":{"read":0,"write":0}}}');`, now+1, logged),
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	out := captureStdout(t, func() {
+		if err := ocDetail("sess-recon"); err != nil {
+			t.Fatalf("ocDetail: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "Price-table drift") {
+		t.Fatalf("output missing the reconciliation block for a session whose logged cost is 2x the rate-derived cost:\n%s", out)
+	}
+	if !strings.Contains(out, "1/1 priced rows carried a logged cost") {
+		t.Errorf("output missing the covered-rows fraction:\n%s", out)
+	}
+	rateStr := fmt.Sprintf("%.4f", rate)
+	loggedStr := fmt.Sprintf("%.4f", logged)
+	if !strings.Contains(out, rateStr) {
+		t.Errorf("output missing the rate-derived total %s:\n%s", rateStr, out)
+	}
+	if !strings.Contains(out, loggedStr) {
+		t.Errorf("output missing the logged provider total %s:\n%s", loggedStr, out)
+	}
+	// Actual paid (the headline) must show the logged figure, exactly the
+	// number this reconciliation block explains the table's absence of.
+	if !strings.Contains(out, fmt.Sprintf("Actual paid:  $%.2f", logged)) {
+		t.Errorf("headline doesn't show the logged Actual paid figure:\n%s", out)
+	}
+}
+
+// TestOcDetail_NoReconciliation_WhenNothingLogged covers the "no noise"
+// contract: a session where every step-finish part carries a zero/absent
+// cost has nothing to reconcile the rate-derived table against, so the
+// block must not appear at all.
+func TestOcDetail_NoReconciliation_WhenNothingLogged(t *testing.T) {
+	withTempStore(t)
+	db := withOCFixtureSessionDB(t)
+
+	now := time.Now().UnixMilli()
+	stmts := []string{
+		fmt.Sprintf(`INSERT INTO session (id, title, model, time_created, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, parent_id, cost, project_id) VALUES ('sess-nolog', 'NoLog', '{"id":"Kimi K2.6","providerID":"kimi"}', %d, 0, 0, 0, 0, '', 0, '');`, now),
+		`INSERT INTO message (id, data) VALUES ('msg-nolog', '{"modelID":"Kimi K2.6"}');`,
+		fmt.Sprintf(`INSERT INTO part (session_id, time_created, message_id, data) VALUES ('sess-nolog', %d, 'msg-nolog', '{"type":"step-finish","tokens":{"input":1000000,"output":100000,"cache":{"read":0,"write":0}}}');`, now+1),
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	out := captureStdout(t, func() {
+		if err := ocDetail("sess-nolog"); err != nil {
+			t.Fatalf("ocDetail: %v", err)
+		}
+	})
+
+	if strings.Contains(out, "Price-table drift") {
+		t.Errorf("output contains a reconciliation block for a session with nothing logged:\n%s", out)
+	}
+}

@@ -384,19 +384,25 @@ func ocDetail(sessionID string) error {
 		pricing[i] = detailRowPrice{Model: st.Model, Prices: p, Priced: ok, LoggedCost: st.LoggedCost}
 	}
 	rows := compute.ComputeIdeal(tokenSteps)
-	// The per-row table is illustrative, but it's no longer priced at the
-	// session's dominant (display) model for every row — OC sessions switch
-	// models mid-run, so it now prices each row at its own step's model,
-	// same as ocSessionSummary below. That headline still isn't derived from
-	// this table (it sums per step directly rather than re-deriving from
-	// printed rows), it's just no longer the odd one out in getting the
-	// per-step rate right.
+	// The table prices each row strictly from its own resolved rate — same
+	// per-step rate ocSessionSummary uses below — and never from that row's
+	// logged cost (see detailRowCost's doc comment in algo.go). The headline
+	// further down applies the opposite preference: it takes each row's
+	// logged cost over its rate whenever OpenCode actually logged one. Those
+	// are two legitimate, differently-sourced numbers for the same session —
+	// what tokeneks' price table would have charged vs. what the provider
+	// actually billed — not a table that's "wrong" relative to the headline.
+	// printDetailCostReconciliation below names the resulting gap explicitly
+	// whenever it's real and large enough to matter, instead of leaving the
+	// reader to notice the table's $ sum doesn't match the headline and
+	// wonder why.
 	printDetailRows(rows, pricing, false)
+	printDetailCostReconciliation(computeDetailCostRecon(rows, pricing))
 
-	// The headline takes Actual/Ideal/Overpay/%ideal from the per-step
-	// summary, not from the single-rate table above — that's the whole
-	// point of this command showing a real, reconciled number instead of
-	// the row-by-row illustration.
+	// The headline takes Actual/Ideal/Overpay/%ideal from ocSessionSummary's
+	// per-step pass, which prefers each row's own logged cost over its rate
+	// — see computeDetailCostRecon's doc comment for how that lines up with
+	// (and diverges from) the rate-derived table above.
 	s, _, ok := ocSessionSummary(steps)
 	if !ok {
 		return fmt.Errorf("no prices configured for any model served in session %s", sessionID)
