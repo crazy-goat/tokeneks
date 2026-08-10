@@ -1,12 +1,123 @@
 package main
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 	"tokeneks/compute"
 )
+
+// claudeCarryForwardLine builds one raw assistant-message JSONL line with
+// explicit cache fields, for scenarios claudeLine (input/output only) can't
+// express.
+func claudeCarryForwardLine(id, model string, input, cacheRead, cacheCreation, output int) string {
+	return `{"type":"assistant","message":{"id":"` + id + `","model":"` + model +
+		`","usage":{"input_tokens":` + strconv.Itoa(input) +
+		`,"cache_read_input_tokens":` + strconv.Itoa(cacheRead) +
+		`,"cache_creation_input_tokens":` + strconv.Itoa(cacheCreation) +
+		`,"output_tokens":` + strconv.Itoa(output) +
+		`},"content":[{"type":"text"}]},"timestamp":"2026-08-03T16:00:00.000Z"}`
+}
+
+// TestClaudeDetail_CarryForwardAcrossModelSwitch is a regression test for
+// the bug this fix exists for: claudeDetail used to run the ideal-cache pass
+// once per model (groupStepsByModel), which discards the carried-forward
+// prompt-cache state at every model switch. Here the whole first turn's
+// context (Input+Output) is read back verbatim under a *different* model on
+// the very next turn — a perfect cache hit spanning the switch. Splitting by
+// model makes that second turn look like a cold start, so its ideal cost is
+// computed off the full input rate instead of the far cheaper cache-read
+// rate, inflating Ideal past Actual for a session that is a full cache hit
+// throughout and should report zero overpay.
+func TestClaudeDetail_CarryForwardAcrossModelSwitch(t *testing.T) {
+	withTempStore(t)
+
+	path := writeClaudeJSONL(t, []string{
+		// Turn 1, claude-opus-5: 1M fresh input tokens, no cache activity yet.
+		claudeCarryForwardLine("msg1", "claude-opus-5", 1_000_000, 0, 0, 100_000),
+		// Turn 2, a *different* model: reads back exactly turn 1's context
+		// (1M input + 100k output = 1.1M) from cache. A correct continuous
+		// ideal-cache pass recognizes this as a full hit; a pass restarted
+		// per model sees 1.1M tokens of cache_read with no prior state and
+		// prices them as if they were fresh input.
+		claudeCarryForwardLine("msg2", "claude-haiku-4-5", 0, 1_100_000, 0, 50_000),
+	})
+
+	var err error
+	out := captureStdout(t, func() { err = claudeDetail(path) })
+	if err != nil {
+		t.Fatalf("claudeDetail() = %v\noutput:\n%s", err, out)
+	}
+
+	actual, ideal := parseTotalActualIdeal(t, out)
+
+	// claude-opus-5: Input=5.0/M, Output=25.0/M. claude-haiku-4-5:
+	// CacheRead=0.1/M, Output=5.0/M (see claudeBuiltinPriceWindows).
+	wantActual := (1_000_000*5.0+100_000*25.0)/1e6 + (1_100_000*0.1+50_000*5.0)/1e6
+	const centTolerance = 0.006
+	if math.Abs(actual-wantActual) > centTolerance {
+		t.Errorf("Actual paid = $%.6f, want $%.6f", actual, wantActual)
+	}
+	// Ideal, computed correctly (continuous pass): turn 2 is a full cache
+	// hit, so its ideal cost equals its actual cost — same total as Actual.
+	// The old, split-by-model computation priced turn 2's 1.1M ideal tokens
+	// as fresh Input (at $1.0/M) instead of CacheRead (at $0.1/M), which
+	// would print Ideal = $8.85 here instead of $7.86 — MORE than Actual,
+	// the impossible result this test guards against.
+	if math.Abs(ideal-wantActual) > centTolerance {
+		t.Errorf("Ideal paid = $%.6f, want $%.6f (a session that is a full cache hit throughout should have Ideal == Actual)", ideal, wantActual)
+	}
+	if actual < ideal-centTolerance {
+		t.Errorf("Actual ($%.6f) < Ideal ($%.6f) — the impossible split-by-model result this fix exists to prevent", actual, ideal)
+	}
+}
+
+// TestClaudeList_CarryForwardAcrossModelSwitch is the same regression as
+// TestClaudeDetail_CarryForwardAcrossModelSwitch but through claudeList's
+// aggregate path (the second of the two Claude call sites that used to
+// split by model).
+func TestClaudeList_CarryForwardAcrossModelSwitch(t *testing.T) {
+	withTempStore(t)
+
+	baseDir := t.TempDir()
+	projectDir := filepath.Join(baseDir, "proj")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fp := filepath.Join(projectDir, "session1.jsonl")
+	content := claudeCarryForwardLine("msg1", "claude-opus-5", 1_000_000, 0, 0, 100_000) + "\n" +
+		claudeCarryForwardLine("msg2", "claude-haiku-4-5", 0, 1_100_000, 0, 50_000) + "\n"
+	if err := os.WriteFile(fp, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prevBase := defaultClaudeSessions
+	defaultClaudeSessions = baseDir
+	t.Cleanup(func() { defaultClaudeSessions = prevBase })
+
+	var err error
+	out := captureStdout(t, func() { err = claudeList(3650, "") })
+	if err != nil {
+		t.Fatalf("claudeList() = %v\noutput:\n%s", err, out)
+	}
+
+	// Columns: TOTAL, Tokens, Paid, Ideal, Overpay, %ideal, $/1M, i$/1M —
+	// Paid is field[2], Ideal is field[3].
+	wantActual := (1_000_000*5.0+100_000*25.0)/1e6 + (1_100_000*0.1+50_000*5.0)/1e6
+	paid, ideal := parseListTotalRow(t, out, 2, 3)
+	const centTolerance = 0.006
+	if math.Abs(paid-wantActual) > centTolerance {
+		t.Errorf("TOTAL Paid = $%.6f, want $%.6f", paid, wantActual)
+	}
+	if math.Abs(ideal-wantActual) > centTolerance {
+		t.Errorf("TOTAL Ideal = $%.6f, want $%.6f (continuous carry-forward across the model switch, not the inflated split-by-model figure)", ideal, wantActual)
+	}
+	if paid < ideal-centTolerance {
+		t.Errorf("TOTAL Paid ($%.6f) < Ideal ($%.6f) — the impossible split-by-model result this fix exists to prevent", paid, ideal)
+	}
+}
 
 // writeClaudeJSONL writes lines (already-serialized JSON, one per line) to a
 // fresh file under t.TempDir() and returns its path.

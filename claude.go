@@ -14,7 +14,10 @@ import (
 	"tokeneks/compute"
 )
 
-const defaultClaudeSessions = "~/.claude/projects"
+// defaultClaudeSessions is a var, not a const, so tests can point it at a
+// temporary directory instead of the real ~/.claude/projects.
+var defaultClaudeSessions = "~/.claude/projects"
+
 const defaultClaudePricing = "~/.tokeneks/claude_models.json"
 
 var (
@@ -384,10 +387,14 @@ type claudeMessage struct {
 type claudeSessionStep struct {
 	Model string
 	Step  compute.StepData
+	// CreatedAt is this message's own timestamp (ms epoch). It's threaded
+	// through to sessionStep so claudeDetail/claudeList can run the
+	// ideal-cache pass once over the session's full, untouched step order and
+	// price each row at its own model afterward — see sessionStep.CreatedAt
+	// (web_store.go) and computeSessionPricing's doc comment for why
+	// splitting by model before running the ideal pass is wrong.
+	CreatedAt int64
 }
-
-func (s claudeSessionStep) modelKey() string           { return s.Model }
-func (s claudeSessionStep) stepData() compute.StepData { return s.Step }
 
 type claudeMessageResult struct {
 	Steps          []claudeSessionStep
@@ -422,7 +429,8 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
 			continue
 		}
-		if ts, err := parseTimestamp(msg.Timestamp); err == nil && ts.After(lastActivity) {
+		ts, tsErr := parseTimestamp(msg.Timestamp)
+		if tsErr == nil && ts.After(lastActivity) {
 			lastActivity = ts
 		}
 		if msg.Type == "user" {
@@ -470,6 +478,13 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 			}
 		}
 
+		createdAt := ts.UnixMilli()
+		if tsErr != nil {
+			// No parseable timestamp: fall back to now rather than the zero
+			// Time's UnixMilli() (year 1), which would look like a message
+			// from before every dated rate window exists.
+			createdAt = time.Now().UnixMilli()
+		}
 		models = append(models, msg.Message.Model)
 		steps = append(steps, claudeSessionStep{
 			Model: msg.Message.Model,
@@ -480,6 +495,7 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 				CacheRead:       msg.Message.Usage.CacheReadInputTokens,
 				Output:          msg.Message.Usage.OutputTokens,
 			},
+			CreatedAt: createdAt,
 		})
 		if id != "" {
 			stepIndexByID[id] = len(steps) - 1
@@ -644,16 +660,16 @@ func claudeDetail(input string) error {
 	}
 	primaryModel := dominantModel(modelCount)
 
-	// Price as of when this session actually happened, not when this report
-	// runs, so a July session keeps costing what it cost in July. LastActivity
-	// is the same timestamp claudeSessions already uses to bucket a session
-	// into a date/day-range, so this stays consistent with that.
-	at := res.LastActivity
-	if at.IsZero() {
-		at = time.Now()
-	}
+	// buildPricingSpecs()["claude"] resolves every model "now" (see its own
+	// doc comment) rather than at this session's LastActivity the way this
+	// function used to — the same rule getSessionDetailFromStore
+	// (web_store.go) already applies to the web dashboard's session detail
+	// view, so the CLI and the dashboard price a Claude session identically
+	// instead of one repricing a Sonnet-5 session's history through
+	// 2026-09-01 and the other not.
+	spec := buildPricingSpecs()["claude"]
 
-	if _, ok := claudeModelPricesAt(primaryModel, at); !ok {
+	if _, ok := spec.PriceFunc(primaryModel, 0); !ok {
 		return fmt.Errorf("no prices configured for model %s", primaryModel)
 	}
 
@@ -664,33 +680,44 @@ func claudeDetail(input string) error {
 	fmt.Printf("Messages: %d\n", len(res.Steps))
 	fmt.Printf("ToolCalls: %d\n\n", res.ToolCalls)
 
-	byModel := groupStepsByModel(res.Steps)
-
-	modelNames := make([]string, 0, len(byModel))
-	for model := range byModel {
-		modelNames = append(modelNames, model)
-	}
-	sort.Strings(modelNames)
-
-	var totalActual, totalIdeal float64
-	for i, model := range modelNames {
-		prices, ok := claudeModelPricesAt(model, at)
-		if !ok {
-			return fmt.Errorf("no prices configured for model %s", model)
+	// Same fail-fast as before this fix (bail before printing anything if any
+	// model in the session has no resolvable price), just checked against
+	// one price per distinct model instead of one per per-model group.
+	seenModels := map[string]bool{}
+	for _, st := range res.Steps {
+		if seenModels[st.Model] {
+			continue
 		}
-		if i > 0 {
-			fmt.Println()
+		seenModels[st.Model] = true
+		if _, ok := spec.PriceFunc(st.Model, st.CreatedAt); !ok {
+			return fmt.Errorf("no prices configured for model %s", st.Model)
 		}
-		fmt.Printf("=== %s (%d messages) ===\n\n", model, len(byModel[model]))
-		rows := compute.ComputeIdealClaude(byModel[model], prices)
-		printDetailRows(rows, uniformDetailPricing(len(rows), model, prices), true)
-		s := compute.SummarizeClaude(rows, prices)
-		totalActual += s.Actual
-		totalIdeal += s.Ideal
-		fmt.Printf("\nSubtotal actual: $%.2f\n", s.Actual)
-		fmt.Printf("Subtotal ideal:  $%.2f\n", s.Ideal)
-		fmt.Printf("Subtotal overpay: $%.2f (%.1f%% of ideal)\n", s.Overpay, s.PctIdeal)
 	}
+
+	// One continuous ideal-cache pass over the session's untouched step
+	// order — see computeSessionPricing's doc comment (web_store.go) for why
+	// splitting by model first (the old byModel := groupStepsByModel(...)
+	// here) inflates Ideal and can produce the impossible Paid < Ideal.
+	steps := make([]sessionStep, len(res.Steps))
+	tokens := make([]compute.StepData, len(res.Steps))
+	for i, st := range res.Steps {
+		steps[i] = sessionStep{Model: st.Model, Data: st.Step, CreatedAt: st.CreatedAt}
+		tokens[i] = st.Step
+	}
+	rows := compute.ComputeIdealClaude(tokens, compute.ModelPrices{})
+
+	// pricing[i] carries rows[i]'s own model's price so a session that
+	// switches models mid-run prices each row correctly — see
+	// detailRowPrice's doc comment (algo.go).
+	pricing := make([]detailRowPrice, len(steps))
+	for i, s := range steps {
+		prices, ok := spec.PriceFunc(s.Model, s.CreatedAt)
+		pricing[i] = detailRowPrice{Model: s.Model, Prices: prices, Priced: ok}
+	}
+	printDetailRows(rows, pricing, true)
+
+	stepPrices := computeSessionPricing(steps, spec.ClaudeStyle, spec.CostIsLogged, spec.PriceFunc)
+	totalActual, totalIdeal := sumStepPricing(stepPrices)
 
 	totalOverpay := totalActual - totalIdeal
 	if totalOverpay < 0 {
@@ -722,20 +749,27 @@ func claudeList(days int, date string) error {
 	var totalActual, totalIdeal float64
 	var totalIn, totalCC, totalCR, totalOut int
 
+	spec := buildPricingSpecs()["claude"]
+
 	for _, sess := range sessions {
 		res := sess.Data
 		if res == nil || len(res.Steps) == 0 {
 			continue
 		}
 
-		byModel := groupStepsByModel(res.Steps)
 		valid := true
-		for model := range byModel {
-			// Price this session's models as of when the session happened
-			// (LastActivity), not "now" — otherwise a Sonnet 5 session from
-			// before 2026-09-01 would silently reprice itself at the
-			// post-cutover rate once that date passes.
-			if _, ok := claudeModelPricesAt(model, sess.LastActivity); !ok {
+		seenModels := map[string]bool{}
+		for _, st := range res.Steps {
+			if seenModels[st.Model] {
+				continue
+			}
+			seenModels[st.Model] = true
+			// buildPricingSpecs()["claude"] resolves every model "now" (see
+			// its own doc comment) rather than at sess.LastActivity as this
+			// used to — the same "reprice at today's rates" rule
+			// applySessionPricing (web_store.go) already applies to the web
+			// dashboard's session list, so the two surfaces agree.
+			if _, ok := spec.PriceFunc(st.Model, st.CreatedAt); !ok {
 				valid = false
 				break
 			}
@@ -744,36 +778,29 @@ func claudeList(days int, date string) error {
 			continue
 		}
 
-		var s compute.Summary
-		for model, modelSteps := range byModel {
-			prices, _ := claudeModelPricesAt(model, sess.LastActivity)
-			rows := compute.ComputeIdealClaude(modelSteps, prices)
-			part := compute.SummarizeClaude(rows, prices)
-			s.TotalCC += part.TotalCC
-			s.TotalCR += part.TotalCR
-			s.TotalIn += part.TotalIn
-			s.TotalOut += part.TotalOut
-			s.TotalIdealCR += part.TotalIdealCR
-			s.TotalIdealIn += part.TotalIdealIn
-			s.TotalIdealCC += part.TotalIdealCC
-			s.TotalWaste += part.TotalWaste
-			s.Actual += part.Actual
-			s.Ideal += part.Ideal
-		}
-		s.Overpay = s.Actual - s.Ideal
-		if s.Overpay < 0 {
-			s.Overpay = 0
-		}
-		if s.Ideal > 0 {
-			s.PctIdeal = s.Overpay / s.Ideal * 100
+		// One continuous ideal-cache pass over this session's untouched step
+		// order, not split by model first — see claudeDetail and
+		// computeSessionPricing (web_store.go) for why splitting throws away
+		// the carry-forward state at every model switch.
+		steps := make([]sessionStep, len(res.Steps))
+		var tokIn, tokCC, tokCR, tokOut int
+		for i, st := range res.Steps {
+			steps[i] = sessionStep{Model: st.Model, Data: st.Step, CreatedAt: st.CreatedAt}
+			tokIn += st.Step.Input
+			tokCC += st.Step.CacheCreation
+			tokCR += st.Step.CacheRead
+			tokOut += st.Step.Output
 		}
 
-		totalActual += s.Actual
-		totalIdeal += s.Ideal
-		totalIn += s.TotalIn
-		totalCC += s.TotalCC
-		totalCR += s.TotalCR
-		totalOut += s.TotalOut
+		actual, ideal := sumStepPricing(computeSessionPricing(steps, spec.ClaudeStyle, spec.CostIsLogged, spec.PriceFunc))
+		overpay, pctIdeal, costPer1M, idealPer1M := footerTotals(actual, ideal, tokIn+tokCC+tokCR+tokOut)
+
+		totalActual += actual
+		totalIdeal += ideal
+		totalIn += tokIn
+		totalCC += tokCC
+		totalCR += tokCR
+		totalOut += tokOut
 
 		timestamp := sess.Birth.UTC().Format("2006-01-02 15:04:05")
 		project := sess.Project
@@ -781,13 +808,10 @@ func claudeList(days int, date string) error {
 			project = project[:23] + ".."
 		}
 		modelShort := claudeShortModelName(sess.DominantModel)
-
-		tokens := s.TotalIn + s.TotalCC + s.TotalCR + s.TotalOut
-		costPer1M := compute.PerMillion(s.Actual, tokens)
-		idealPer1M := compute.PerMillion(s.Ideal, tokens)
+		tokens := tokIn + tokCC + tokCR + tokOut
 
 		fmt.Printf("%19s  %-36s  %-14s  %-25s  %4d  %8s  %8.2f  %7.2f  %10.2f  %6.1f%%  %8.2f  %8.2f\n",
-			timestamp, sess.ID, modelShort, project, sess.Msgs, formatTokens(tokens), s.Actual, s.Ideal, s.Overpay, s.PctIdeal, costPer1M, idealPer1M)
+			timestamp, sess.ID, modelShort, project, sess.Msgs, formatTokens(tokens), actual, ideal, overpay, pctIdeal, costPer1M, idealPer1M)
 	}
 
 	fmt.Println(strings.Repeat("-", separatorWidthClaudeMix))

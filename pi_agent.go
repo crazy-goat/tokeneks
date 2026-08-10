@@ -11,7 +11,9 @@ import (
 	"tokeneks/compute"
 )
 
-const defaultPISessions = "~/.pi/agent/sessions"
+// defaultPISessions is a var, not a const, so tests can point it at a
+// temporary directory instead of the real ~/.pi/agent/sessions.
+var defaultPISessions = "~/.pi/agent/sessions"
 
 type piUsage struct {
 	Input      int    `json:"input"`
@@ -50,10 +52,15 @@ type piSessionStep struct {
 	Model string
 	Step  compute.StepData
 	Cost  float64 // actual cost from session data
+	// CreatedAt is this step's own timestamp (ms epoch), needed to resolve a
+	// derived PI rate at the window that was actually in effect when the
+	// message ran — see sessionStep.CreatedAt (web_store.go) for the full
+	// rationale. Also what lets piDetail/piList run the ideal-cache pass
+	// once over the session's untouched step order and price each row at its
+	// own model's rate afterward, instead of splitting by model first (see
+	// computeSessionPricing's doc comment for why that inflates Ideal).
+	CreatedAt int64
 }
-
-func (s piSessionStep) modelKey() string           { return s.Model }
-func (s piSessionStep) stepData() compute.StepData { return s.Step }
 
 type piSessionData struct {
 	DominantModel  string
@@ -95,7 +102,8 @@ func piSessionUsage(fp string) (piSessionData, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue
 		}
-		if ts, err := parseTimestamp(entry.Timestamp); err == nil && ts.After(data.LastActivity) {
+		ts, tsErr := parseTimestamp(entry.Timestamp)
+		if tsErr == nil && ts.After(data.LastActivity) {
 			data.LastActivity = ts
 		}
 
@@ -134,7 +142,15 @@ func piSessionUsage(fp string) (piSessionData, error) {
 			CacheRead:     entry.Message.Usage.CacheRead,
 			Output:        entry.Message.Usage.Output,
 		}
-		data.Steps = append(data.Steps, piSessionStep{Model: entry.Message.Model, Step: step, Cost: entry.Message.Usage.Cost.Total})
+		createdAt := ts.UnixMilli()
+		if tsErr != nil {
+			// A message with no parseable timestamp still needs some "at" to
+			// resolve a rate with; falling back to now is safer than the zero
+			// Time's epoch-1 UnixMilli(), which would look like a message from
+			// 1970 and could dodge every dated rate window.
+			createdAt = time.Now().UnixMilli()
+		}
+		data.Steps = append(data.Steps, piSessionStep{Model: entry.Message.Model, Step: step, Cost: entry.Message.Usage.Cost.Total, CreatedAt: createdAt})
 		if entry.Message.Provider != "" {
 			data.ModelProviders[entry.Message.Model] = entry.Message.Provider
 		}
@@ -529,65 +545,75 @@ func piDetail(input string, days int) error {
 	fmt.Printf("Messages: %d\n", len(data.Steps))
 	fmt.Printf("Model:    %s\n\n", data.DominantModel)
 
-	byModel := groupStepsByModel(data.Steps)
+	// The ideal-cache algorithm carries a model of the prompt cache forward
+	// step to step; it is only correct run once over the session's full,
+	// untouched step order. This used to split data.Steps by model first
+	// (groupStepsByModel) and run the ideal pass per group, which resets that
+	// carry-forward state at every model switch — inflating Ideal and, on a
+	// real mixed-model session, producing the impossible Paid < Ideal. See
+	// computeSessionPricing (web_store.go), the reference implementation this
+	// now reuses so the CLI and the web dashboard can never disagree about a
+	// session's numbers.
+	spec := buildPricingSpecs()["pi"]
 
-	// groupStepsByModel keeps only tokens, not the per-message logged cost
-	// (compute.StepData has no Cost field), so the unpriced report below
-	// needs its own pass over the untouched piSessionStep list to know how
-	// much money a model with no resolvable price was actually billed.
-	loggedByModel := make(map[string]float64, len(byModel))
-	for _, st := range data.Steps {
-		loggedByModel[st.Model] += st.Cost
+	steps := make([]sessionStep, len(data.Steps))
+	tokens := make([]compute.StepData, len(data.Steps))
+	for i, st := range data.Steps {
+		steps[i] = sessionStep{Model: st.Model, LoggedCost: st.Cost, Data: st.Step, CreatedAt: st.CreatedAt}
+		tokens[i] = st.Step
 	}
 
-	models := make([]string, 0, len(byModel))
-	for model := range byModel {
-		models = append(models, model)
+	var rows []compute.IdealRow
+	if spec.ClaudeStyle {
+		rows = compute.ComputeIdealClaude(tokens, compute.ModelPrices{})
+	} else {
+		rows = compute.ComputeIdeal(tokens)
 	}
-	sort.Strings(models)
 
-	var totalActual, totalIdeal float64
-	var unpriced []unpricedModel
-	printedAny := false
-	for _, model := range models {
-		steps := byModel[model]
+	// pricing[i] carries rows[i]'s own model's price, resolved at that
+	// step's own timestamp, so a row is never priced at whichever model
+	// happens to be dominant — see detailRowPrice's doc comment (algo.go).
+	pricing := make([]detailRowPrice, len(steps))
+	for i, s := range steps {
+		prices, ok := spec.PriceFunc(s.Model, s.CreatedAt)
+		pricing[i] = detailRowPrice{Model: s.Model, Prices: prices, Priced: ok, LoggedCost: s.LoggedCost}
+	}
 
-		prices, ok := resolveAgentPrices("pi", model)
-		if !ok {
-			var tokens int
-			for _, s := range steps {
-				tokens += s.Input + s.CacheCreation + s.CacheRead + s.Output
-			}
-			unpriced = append(unpriced, unpricedModel{Agent: "PI", Model: model, Tokens: tokens, Steps: len(steps), LoggedCost: loggedByModel[model]})
+	if spec.ClaudeStyle {
+		printDetailRowsClaude(rows, pricing)
+	} else {
+		printDetailRows(rows, pricing, false)
+	}
+
+	// Paid/Ideal for the TOTAL line, and the unpriced-model report, both come
+	// from computeSessionPricing rather than from the printed rows above:
+	// unlike the per-row display (which only falls back to a model's logged
+	// cost when it has no resolvable rate at all), computeSessionPricing
+	// always prefers PI's own logged cost as Paid when there is one — the
+	// same preference totalsByAgent (main.go) uses for the `total` command,
+	// so the TOTAL line here agrees with it.
+	stepPrices := computeSessionPricing(steps, spec.ClaudeStyle, spec.CostIsLogged, spec.PriceFunc)
+	totalActual, totalIdeal := sumStepPricing(stepPrices)
+
+	unpricedByModel := map[string]*unpricedModel{}
+	for _, sp := range stepPrices {
+		if sp.Priced {
 			continue
 		}
-
-		if printedAny {
-			fmt.Println()
+		u := unpricedByModel[sp.Model]
+		if u == nil {
+			u = &unpricedModel{Agent: "PI", Model: sp.Model}
+			unpricedByModel[sp.Model] = u
 		}
-		printedAny = true
-		fmt.Printf("=== %s (%d messages) ===\n\n", model, len(steps))
-
-		if !prices.SupportsCacheCreation {
-			rows := compute.ComputeIdeal(steps)
-			printDetailRows(rows, uniformDetailPricing(len(rows), model, prices), false)
-			s := compute.Summarize(rows, prices)
-			totalActual += s.Actual
-			totalIdeal += s.Ideal
-			fmt.Printf("\nSubtotal actual: $%.2f\n", s.Actual)
-			fmt.Printf("Subtotal ideal:  $%.2f\n", s.Ideal)
-			fmt.Printf("Subtotal overpay: $%.2f (%.1f%% of ideal)\n", s.Overpay, s.PctIdeal)
-		} else {
-			rows := compute.ComputeIdealClaude(steps, prices)
-			printDetailRowsClaude(rows, uniformDetailPricing(len(rows), model, prices))
-			s := compute.SummarizeClaude(rows, prices)
-			totalActual += s.Actual
-			totalIdeal += s.Ideal
-			fmt.Printf("\nSubtotal actual: $%.2f\n", s.Actual)
-			fmt.Printf("Subtotal ideal:  $%.2f\n", s.Ideal)
-			fmt.Printf("Subtotal overpay: $%.2f (%.1f%% of ideal)\n", s.Overpay, s.PctIdeal)
-		}
+		u.Steps++
+		u.Tokens += sp.Tokens
+		u.LoggedCost += sp.LoggedCost
 	}
+	unpriced := make([]unpricedModel, 0, len(unpricedByModel))
+	for _, u := range unpricedByModel {
+		unpriced = append(unpriced, *u)
+	}
+	sort.Slice(unpriced, func(i, j int) bool { return unpriced[i].Model < unpriced[j].Model })
 
 	totalOverpay, pctIdeal, _, _ := footerTotals(totalActual, totalIdeal, 0)
 
@@ -614,6 +640,8 @@ func piList(days int, date string) error {
 	var totalActual, totalIdeal float64
 	var totalIn, totalCR, totalOut int
 
+	spec := buildPricingSpecs()["pi"]
+
 	unpricedByModel := map[string]*unpricedModel{}
 	for _, sess := range sessions {
 		data := sess.Data
@@ -621,77 +649,48 @@ func piList(days int, date string) error {
 			continue
 		}
 
-		byModel := groupStepsByModel(data.Steps)
-
-		// See piDetail for why this needs its own pass: groupStepsByModel
-		// only keeps compute.StepData, which has no Cost field.
-		loggedByModel := make(map[string]float64, len(byModel))
-		for _, st := range data.Steps {
-			loggedByModel[st.Model] += st.Cost
+		// One continuous pass over this session's untouched step order, not
+		// split by model first — see piDetail and computeSessionPricing
+		// (web_store.go) for why splitting throws away the ideal-cache
+		// carry-forward state at every model switch.
+		steps := make([]sessionStep, len(data.Steps))
+		var tokIn, tokCR, tokOut int
+		for i, st := range data.Steps {
+			steps[i] = sessionStep{Model: st.Model, LoggedCost: st.Cost, Data: st.Step, CreatedAt: st.CreatedAt}
+			tokIn += st.Step.Input
+			tokCR += st.Step.CacheRead
+			tokOut += st.Step.Output
 		}
 
-		var s compute.Summary
-		for model, steps := range byModel {
-			prices, ok := resolveAgentPrices("pi", model)
-			if !ok {
-				u := unpricedByModel[model]
-				if u == nil {
-					u = &unpricedModel{Agent: "PI", Model: model}
-					unpricedByModel[model] = u
-				}
-				for _, st := range steps {
-					u.Tokens += st.Input + st.CacheCreation + st.CacheRead + st.Output
-				}
-				u.Steps += len(steps)
-				u.LoggedCost += loggedByModel[model]
+		stepPrices := computeSessionPricing(steps, spec.ClaudeStyle, spec.CostIsLogged, spec.PriceFunc)
+		actual, ideal := sumStepPricing(stepPrices)
+		for _, sp := range stepPrices {
+			if sp.Priced {
 				continue
 			}
-			if !prices.SupportsCacheCreation {
-				rows := compute.ComputeIdeal(steps)
-				part := compute.Summarize(rows, prices)
-				s.TotalCR += part.TotalCR
-				s.TotalIn += part.TotalIn
-				s.TotalOut += part.TotalOut
-				s.TotalIdealCR += part.TotalIdealCR
-				s.TotalIdealIn += part.TotalIdealIn
-				s.TotalWaste += part.TotalWaste
-				s.Actual += part.Actual
-				s.Ideal += part.Ideal
-			} else {
-				rows := compute.ComputeIdealClaude(steps, prices)
-				part := compute.SummarizeClaude(rows, prices)
-				s.TotalCR += part.TotalCR
-				s.TotalIn += part.TotalIn
-				s.TotalOut += part.TotalOut
-				s.TotalIdealCR += part.TotalIdealCR
-				s.TotalIdealIn += part.TotalIdealIn
-				s.TotalWaste += part.TotalWaste
-				s.Actual += part.Actual
-				s.Ideal += part.Ideal
+			u := unpricedByModel[sp.Model]
+			if u == nil {
+				u = &unpricedModel{Agent: "PI", Model: sp.Model}
+				unpricedByModel[sp.Model] = u
 			}
-		}
-		s.Overpay = s.Actual - s.Ideal
-		if s.Overpay < 0 {
-			s.Overpay = 0
-		}
-		if s.Ideal > 0 {
-			s.PctIdeal = s.Overpay / s.Ideal * 100
+			u.Steps++
+			u.Tokens += sp.Tokens
+			u.LoggedCost += sp.LoggedCost
 		}
 
-		totalActual += s.Actual
-		totalIdeal += s.Ideal
-		totalIn += s.TotalIn
-		totalCR += s.TotalCR
-		totalOut += s.TotalOut
+		overpay, pctIdeal, costPer1M, idealPer1M := footerTotals(actual, ideal, tokIn+tokCR+tokOut)
+
+		totalActual += actual
+		totalIdeal += ideal
+		totalIn += tokIn
+		totalCR += tokCR
+		totalOut += tokOut
 
 		timestamp := sess.Birth.UTC().Format("2006-01-02 15:04:05")
-
-		tokens := s.TotalIn + s.TotalCR + s.TotalOut
-		costPer1M := compute.PerMillion(s.Actual, tokens)
-		idealPer1M := compute.PerMillion(s.Ideal, tokens)
+		tokens := tokIn + tokCR + tokOut
 
 		fmt.Printf("%19s  %-36s  %-18.18s  %4d  %7s  %6.2f  %6.2f  %8.2f  %6.1f%%  %7.2f  %7.2f\n",
-			timestamp, sess.ID, sess.DominantModel, sess.Msgs, formatTokens(tokens), s.Actual, s.Ideal, s.Overpay, s.PctIdeal, costPer1M, idealPer1M)
+			timestamp, sess.ID, sess.DominantModel, sess.Msgs, formatTokens(tokens), actual, ideal, overpay, pctIdeal, costPer1M, idealPer1M)
 	}
 
 	fmt.Println(strings.Repeat("-", separatorWidthPi))
