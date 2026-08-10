@@ -756,12 +756,11 @@ type agentPricingSpec struct {
 // buildPricingSpecs returns the pricing rules for every agent, keyed by the
 // store's lowercase agent name ("opencode", "pi", "claude").
 //
-// claudeGlobalModelPrices rebuilds its map from memoized overlays on every
-// call — fine done once per report/request, wasteful done once per session
-// or step, so it's resolved once here rather than inside the returned
-// PriceFunc closures.
+// Every PriceFunc here resolves at the timestamp it is handed, so a session
+// keeps the rate that was in effect while it ran. Anything that prices a
+// stored message must pass that message's own time; passing time.Now() would
+// silently reprice history the next time any dated window opens.
 func buildPricingSpecs() map[string]agentPricingSpec {
-	claudePrices := claudeGlobalModelPrices()
 	return map[string]agentPricingSpec{
 		"opencode": {
 			Label:        "OC",
@@ -777,8 +776,24 @@ func buildPricingSpecs() map[string]agentPricingSpec {
 		},
 		"claude": {
 			Label: "CLAUDE",
-			PriceFunc: func(m string, _ int64) (compute.ModelPrices, bool) {
-				p, ok := claudePrices[m]
+			// Resolved at the message's own timestamp, like the other two
+			// agents. This used to hoist claudeGlobalModelPrices() out of
+			// the closure and ignore "at" entirely, which repriced every
+			// historical session at today's rate — harmless while no
+			// built-in model had a dated window in the past, and a 50%
+			// overstatement of every pre-cutover Sonnet 5 session the
+			// moment claudeSonnet5PriceChange goes by. claudeModelPricesAt
+			// is a handful of lookups against memoized overlays, so what
+			// the hoist was avoiding (claudeGlobalModelPrices rebuilding a
+			// map of every known model) doesn't arise here anyway.
+			PriceFunc: func(m string, at int64) (compute.ModelPrices, bool) {
+				// at == 0 is "no particular message", used by the callers
+				// that only ask whether a model is priceable at all.
+				when := time.Now()
+				if at > 0 {
+					when = time.UnixMilli(at)
+				}
+				p, ok := claudeModelPricesAt(m, when)
 				return p, ok && p.Input > 0
 			},
 			ClaudeStyle:  true,

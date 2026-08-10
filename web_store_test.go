@@ -239,3 +239,42 @@ func TestGatherWebSessionsFromStore_MatchesRollingCLIWindow(t *testing.T) {
 		t.Errorf("dashboard (no start/end) OC total = %v, CLI --days 30 OC total = %v", dashboardTotal, oc.Actual)
 	}
 }
+
+// TestBuildPricingSpecs_ClaudePricesAtMessageTime pins the one thing that
+// distinguishes a historical report from a wrong one: a message is priced at
+// the rate that was in effect when it was sent.
+//
+// The claude spec used to take an "at" it never read, hoisting a single
+// resolved-at-now price map out of the closure. That was invisible for as
+// long as no built-in Claude model had a dated window in the past — and
+// claude-sonnet-5's is still in the future today, so no real session can
+// expose it either. It would have started overstating every pre-cutover
+// Sonnet 5 session by 50% on the day the window opened, with nothing in the
+// output to say the numbers had moved.
+func TestBuildPricingSpecs_ClaudePricesAtMessageTime(t *testing.T) {
+	if _, ok := claudeJSONOverlayPrices()["claude-sonnet-5"]; ok {
+		t.Skip("~/.tokeneks/claude_models.json overrides claude-sonnet-5; the built-in windows this test pins are not in play")
+	}
+
+	spec := buildPricingSpecs()["claude"]
+
+	pre, ok := spec.PriceFunc("claude-sonnet-5", claudeSonnet5PriceChange.Add(-24*time.Hour).UnixMilli())
+	if !ok {
+		t.Fatal("claude-sonnet-5 unpriced before the cutover")
+	}
+	post, ok := spec.PriceFunc("claude-sonnet-5", claudeSonnet5PriceChange.Add(24*time.Hour).UnixMilli())
+	if !ok {
+		t.Fatal("claude-sonnet-5 unpriced after the cutover")
+	}
+
+	if pre.Output == post.Output {
+		t.Fatalf("PriceFunc ignores its timestamp: a message from before %s prices at the same output rate (%v) as one from after",
+			claudeSonnet5PriceChange.Format("2006-01-02"), pre.Output)
+	}
+	if pre.Output != 10.0 {
+		t.Errorf("pre-cutover output rate = %v, want 10.0 (introductory)", pre.Output)
+	}
+	if post.Output != 15.0 {
+		t.Errorf("post-cutover output rate = %v, want 15.0", post.Output)
+	}
+}
