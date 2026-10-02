@@ -65,3 +65,10 @@ If the file is missing, built-in defaults are used.
 - The Go module name is `tokeneks`.
 - Web UI branding uses `TokenEKS`.
 - If you run plain `go build` without `-o`, the produced binary name is derived from the folder name, not from the Cobra command name.
+
+## Development
+
+See [AGENTS.md](AGENTS.md) for build, test, lint and release commands, and
+[docs/workflow.md](docs/workflow.md) for the development process. `go-sqlite3` needs cgo,
+so building requires a C compiler. Run the checks with `bin/lint.sh` and
+`go test -race ./...`. Licensed under the MIT license, see [LICENSE](LICENSE).
