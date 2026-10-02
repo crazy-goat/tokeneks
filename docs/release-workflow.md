@@ -59,7 +59,8 @@ git push origin vX.Y.Z
 ## 5. GitHub Release
 
 Pushing the tag starts `.github/workflows/release.yaml`. It builds the `tokeneks` binary
-for linux and darwin on amd64 and arm64, creates the GitHub Release with the notes from
+for linux and darwin on amd64 and arm64 (cgo, each on a native runner, because
+`go-sqlite3` needs cgo), creates the GitHub Release with the notes from
 the matching `CHANGELOG.md` section, and attaches the binaries and a `checksums.txt` file.
 It fails when the section is missing. The workflow reads `CHANGELOG.md` from the tagged
 commit, so the release PR with the `## [X.Y.Z]` section must be **merged before** you
