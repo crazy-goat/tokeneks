@@ -2,3 +2,8 @@ tmp/
 ncp
 nexos-cache-problems
 tokeneks
+.DS_Store
+/dist/
+/findings.md
+/review.md
+/.env.worktree
