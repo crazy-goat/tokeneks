@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
-- Unparseable JSONL lines (and OpenCode parts) are no longer dropped silently: the Claude and PI readers and the OpenCode detail reader now print a `warning: skipped N unparseable line(s) in <source>` message to stderr (once per source and count) (#52)
+- Unparseable JSONL lines (and OpenCode parts) are no longer dropped silently: the Claude and PI readers and the OpenCode detail reader now print a `warning: skipped N unparseable line(s) in <source>` message to stderr (again only when the count grows) (#52)
 
 ## [0.1.0] - 2026-10-02
 

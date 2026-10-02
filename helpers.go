@@ -50,7 +50,7 @@ func warnSkippedLines(source string, n int) {
 	}
 	skippedLinesWarnMu.Lock()
 	defer skippedLinesWarnMu.Unlock()
-	if skippedLinesWarned[source] == n {
+	if n <= skippedLinesWarned[source] {
 		return
 	}
 	skippedLinesWarned[source] = n
