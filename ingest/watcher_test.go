@@ -69,7 +69,7 @@ func TestWatcher_InitialSync_IngestsAndEmits(t *testing.T) {
 	w := NewWatcher(st, map[string]Source{src.Agent(): src}, map[string]Parser{"claude": echoParser("hi")}, WatcherConfig{
 		Debounce: 50 * time.Millisecond,
 	})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -164,7 +164,7 @@ func TestWatcher_InitialSync_SkipsUnchangedSession(t *testing.T) {
 			return echoParser("fresh")(ctx, ref)
 		},
 	}, WatcherConfig{Debounce: 20 * time.Millisecond})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -196,7 +196,7 @@ func TestWatcher_InitialSync_ReingestsChangedSession(t *testing.T) {
 			return echoParser("fresh")(ctx, ref)
 		},
 	}, WatcherConfig{Debounce: 20 * time.Millisecond})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -256,7 +256,7 @@ func TestWatcher_FileChange_Reingests(t *testing.T) {
 	w := NewWatcher(st, map[string]Source{src.Agent(): src}, map[string]Parser{"claude": counterParser}, WatcherConfig{
 		Debounce: 50 * time.Millisecond,
 	})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -291,7 +291,7 @@ func TestWatcher_Rename_Reingests(t *testing.T) {
 			return echoParser("renamed")(ctx, ref)
 		},
 	}, WatcherConfig{Debounce: 20 * time.Millisecond})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	w.handleFSEvent(context.Background(), fsnotify.Event{Name: fp, Op: fsnotify.Rename})
 	events := collectEvents(w.Events(), 1, time.Second)
@@ -314,7 +314,7 @@ func TestWatcher_FileRemove_KeepsSessionEmitsEvent(t *testing.T) {
 	w := NewWatcher(st, map[string]Source{src.Agent(): src}, map[string]Parser{"claude": echoParser("hi")}, WatcherConfig{
 		Debounce: 50 * time.Millisecond,
 	})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -358,7 +358,7 @@ func TestWatcher_Debounce_CoalescesEvents(t *testing.T) {
 			atomic.AddInt32(&parseCount, 1)
 			return echoParser("x")(ctx, ref)
 		}}, WatcherConfig{Debounce: 200 * time.Millisecond})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

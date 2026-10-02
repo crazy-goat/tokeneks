@@ -19,7 +19,7 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	type claudeContentItem struct {
 		Type  string          `json:"type"`
@@ -250,7 +250,7 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 						}
 					}
 				}
-				sf.Close()
+				_ = sf.Close()
 			}
 			child := SessionLink{Agent: "Claude", ID: childID, Title: childTitle, Project: project}
 			childFP := filepath.Join(subDir, subEntry.Name())

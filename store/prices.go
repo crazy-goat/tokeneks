@@ -48,7 +48,7 @@ func (s *Store) UpsertModelPrices(ctx context.Context, prices []ModelPrice) erro
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO model_price
@@ -99,7 +99,7 @@ func (s *Store) DeleteModelPrices(ctx context.Context, source string, pairs [][2
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.PrepareContext(ctx, `DELETE FROM model_price WHERE source = ? AND provider = ? AND model = ?`)
 	if err != nil {

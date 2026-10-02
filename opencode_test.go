@@ -368,8 +368,7 @@ func TestOcActualCost_AllStepsLogged_UsesLoggedSum(t *testing.T) {
 
 // TestOcActualCost_NoLoggedCost_FallsBackToRateTable is the second case: a
 // step that logged nothing (LoggedCost == 0) must be priced from the rate
-// table, exactly as ocSessionCost/totalsByAgent already do for PI and OC
-// elsewhere.
+// table, exactly as totalsByAgent does for PI and OC.
 func TestOcActualCost_NoLoggedCost_FallsBackToRateTable(t *testing.T) {
 	step := ocStep{Data: compute.StepData{Input: 1_000_000, Output: 200_000, CacheRead: 50_000}, LoggedCost: 0}
 

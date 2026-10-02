@@ -244,7 +244,7 @@ func TestGetSessionDetailFromStoreKeepsLeadingPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	setTokeneksStore(st)
 	defer setTokeneksStore(nil)
 

@@ -348,7 +348,7 @@ func handleAPISessionStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	fmt.Fprintf(w, "event: revision\ndata: %s\n\n", revision)
+	_, _ = fmt.Fprintf(w, "event: revision\ndata: %s\n\n", revision)
 	flusher.Flush()
 
 	ticker := time.NewTicker(2 * time.Second)
@@ -361,7 +361,7 @@ func handleAPISessionStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-keepAlive.C:
-			fmt.Fprint(w, ": keepalive\n\n")
+			_, _ = fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()
 		case <-ticker.C:
 			nextRevision, err := sessionRevision(agent, id)
@@ -373,7 +373,7 @@ func handleAPISessionStream(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			revision = nextRevision
-			fmt.Fprintf(w, "event: revision\ndata: %s\n\n", revision)
+			_, _ = fmt.Fprintf(w, "event: revision\ndata: %s\n\n", revision)
 			flusher.Flush()
 		}
 	}
@@ -407,9 +407,14 @@ func handleAPISessionDetail(w http.ResponseWriter, r *http.Request) {
 	if revision, err := sessionRevisionFromStore(r.Context(), agent, id); err == nil {
 		w.Header().Set("X-Session-Revision", revision)
 	}
+	body, err := json.Marshal(detail)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	json.NewEncoder(w).Encode(detail)
+	_, _ = w.Write(append(body, '\n'))
 }
 
 func handleAPISessionMarkdown(w http.ResponseWriter, r *http.Request) {

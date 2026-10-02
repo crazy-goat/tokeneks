@@ -49,7 +49,7 @@ func warnNoAgentPrice(agent, model string) {
 	// commands that handle a missing rate differently (`total` keeps a logged
 	// cost and only loses the ideal, others drop the step entirely), so a
 	// specific claim here would be wrong somewhere.
-	fmt.Fprintf(resolveWarnOut, "warning: no price for %s model %q; its tokens cannot be priced\n", agent, model)
+	_, _ = fmt.Fprintf(resolveWarnOut, "warning: no price for %s model %q; its tokens cannot be priced\n", agent, model)
 }
 
 // anachronismTolerance bounds how close a lookup's "at" must be to the
@@ -92,7 +92,7 @@ func warnAnachronisticCatalogPrice(agent, model, source string, at int64) {
 		return
 	}
 	agentPriceWarned[key] = true
-	fmt.Fprintf(resolveWarnOut,
+	_, _ = fmt.Fprintf(resolveWarnOut,
 		"warning: %s model %q priced via %s for a message from %s; %s has no dated history and states only today's rate, which may not be what applied back then\n",
 		agent, model, source, time.UnixMilli(at).UTC().Format("2006-01-02"), source)
 }
@@ -195,14 +195,14 @@ func resetResolvedPrices() {
 
 // storeModelPriceWindows reads every row for one provider out of the store
 // and groups them by model into ordered (oldest-first) dated windows — the
-// derived layer's analogue of storeModelPricesMap. Unlike a models.dev sync
+// derived layer's per-model price history. Unlike a models.dev sync
 // or a live catalog, which only ever have one row per model, a derived
 // model can have more than one now that prices derive fits a rate change
 // as separate time segments (see prices_derive.go); collapsing them into a
 // plain map (last row wins, in whatever order the store happens to return
 // rows) would silently drop every window but one. Returns nil (not an
-// error) under the same "this layer has nothing to say" convention
-// storeModelPricesMap uses.
+// error) when the store is unavailable or the provider has no rows: this
+// layer then has nothing to say.
 func storeModelPriceWindows(provider string) map[string][]agentPriceWindow {
 	st := getTokeneksStore()
 	if st == nil {
@@ -269,7 +269,7 @@ func normalizeModelKey(s string) string {
 // (falling through to the next layer) rather than picking one — a wrong
 // pick would look exactly as authoritative as a real match.
 func warnAmbiguousNormalizedModel(key string, models []string) {
-	fmt.Fprintf(resolveWarnOut, "warning: ambiguous models.dev normalization %q matches %s; skipping the normalized match for these\n",
+	_, _ = fmt.Fprintf(resolveWarnOut, "warning: ambiguous models.dev normalization %q matches %s; skipping the normalized match for these\n",
 		key, strings.Join(models, ", "))
 }
 

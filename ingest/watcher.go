@@ -129,7 +129,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 	w.fsw = fsw
 	w.mu.Unlock()
-	defer fsw.Close()
+	defer func() { _ = fsw.Close() }()
 
 	// Set up filesystem watches before the initial ingest so that any
 	// changes arriving while we are parsing are caught by fsnotify and
@@ -331,7 +331,7 @@ func (w *Watcher) watchOpenCode(ctx context.Context, src Source) {
 		w.pollOpenCodeByTicker(ctx, src)
 		return
 	}
-	defer fsw.Close()
+	defer func() { _ = fsw.Close() }()
 
 	if err := fsw.Add(dbDir); err != nil {
 		w.log.Printf("opencode: cannot watch %s (%v); falling back to poll", dbDir, err)

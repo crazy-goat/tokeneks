@@ -215,7 +215,11 @@ func runWeb(port string, days int) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() {
+		if err := st.Close(); err != nil {
+			log.Printf("close store: %v", err)
+		}
+	}()
 	setTokeneksStore(st)
 
 	// Initial ingest is handled by the watcher's initial sync (see
@@ -231,7 +235,7 @@ func runWeb(port string, days int) error {
 	w := ingest.NewWatcher(st, sources, parsers, ingest.WatcherConfig{
 		Logger: log.New(os.Stderr, "[web-watch] ", log.LstdFlags),
 	})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 	go func() {
 		if err := w.Run(ctx); err != nil {
 			log.Printf("web watcher stopped: %v", err)
@@ -257,12 +261,12 @@ func runWeb(port string, days int) error {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(webIndexHTML)
+		_, _ = w.Write(webIndexHTML)
 	})
 
 	mux.HandleFunc("/detail", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(webDetailHTML)
+		_, _ = w.Write(webDetailHTML)
 	})
 
 	mux.HandleFunc("/static/chart.umd.min.js", func(w http.ResponseWriter, r *http.Request) {
@@ -282,7 +286,12 @@ func runWeb(port string, days int) error {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "private, max-age=30")
-		json.NewEncoder(w).Encode(sessions)
+		body, err := json.Marshal(sessions)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(append(body, '\n'))
 	})
 
 	mux.HandleFunc("/api/sessions-stream", handleAPISessionsStream)
@@ -317,10 +326,10 @@ func handleAPISessionsStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-keepAlive.C:
-			fmt.Fprint(w, ": keepalive\n\n")
+			_, _ = fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()
 		case <-ch:
-			fmt.Fprint(w, "event: changed\ndata: {}\n\n")
+			_, _ = fmt.Fprint(w, "event: changed\ndata: {}\n\n")
 			flusher.Flush()
 		}
 	}

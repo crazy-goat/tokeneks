@@ -93,7 +93,7 @@ func piSessionUsage(fp string) (piSessionData, error) {
 	if err != nil {
 		return piSessionData{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var data piSessionData
 	data.ModelProviders = make(map[string]string)
@@ -409,7 +409,7 @@ func piSessionHeaderParent(fp string) (parentPath, parentID string, ok bool) {
 	if err != nil {
 		return "", "", false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := newJSONLScanner(f)
 	if !scanner.Scan() {

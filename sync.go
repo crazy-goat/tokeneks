@@ -21,7 +21,11 @@ func runSync(watch, force bool) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() {
+		if err := st.Close(); err != nil {
+			log.Printf("close store: %v", err)
+		}
+	}()
 
 	sources, parsers := buildAgentIO()
 
@@ -60,7 +64,7 @@ func runSync(watch, force bool) error {
 	w := ingest.NewWatcher(st, sources, parsers, ingest.WatcherConfig{
 		Logger: log.New(os.Stderr, "[watch] ", log.LstdFlags),
 	})
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
