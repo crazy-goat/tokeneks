@@ -9,8 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"tokeneks/store"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 // ChangeKind describes how a session's underlying source changed.
@@ -484,5 +485,3 @@ func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
 }
-
-func nowMs() int64 { return time.Now().UnixMilli() }

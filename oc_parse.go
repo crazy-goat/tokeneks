@@ -24,14 +24,13 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 	var title, modelRaw, parentID, projectName string
 	var createdAt int64
 	var modelName string
-	if err := db.QueryRow(`
+	// Non-row errors are unexpected; proceed with zero values.
+	_ = db.QueryRow(`
 		SELECT s.title, s.model, s.time_created, ifnull(s.parent_id, ''), coalesce(p.name, p.worktree, '')
 		FROM session s
 		LEFT JOIN project p ON p.id = s.project_id
 		WHERE s.id = ?
-	`, sessionID).Scan(&title, &modelRaw, &createdAt, &parentID, &projectName); err != nil && err != sql.ErrNoRows {
-		// non-row errors are unexpected; proceed with zero values
-	}
+	`, sessionID).Scan(&title, &modelRaw, &createdAt, &parentID, &projectName)
 	if modelRaw != "" {
 		var m struct {
 			ID string `json:"id"`
@@ -214,9 +213,8 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 	}
 	if parentID != "" {
 		var parentTitle string
-		if err := db.QueryRow("SELECT title FROM session WHERE id = ?", parentID).Scan(&parentTitle); err != nil && err != sql.ErrNoRows {
-			// best-effort parent title lookup; leave empty
-		}
+		// Best-effort parent title lookup; leave empty on failure.
+		_ = db.QueryRow("SELECT title FROM session WHERE id = ?", parentID).Scan(&parentTitle)
 		d.Parent = &SessionLink{Agent: "OpenCode", ID: parentID, Title: parentTitle}
 	}
 	childRows, err := db.Query("SELECT id, title, json_extract(model, '$.id'), ifnull(tokens_input,0), ifnull(tokens_output,0), ifnull(tokens_cache_read,0), ifnull(tokens_cache_write,0), cost, ifnull(time_created,0) FROM session WHERE parent_id = ? ORDER BY time_created ASC", sessionID)

@@ -139,7 +139,7 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 		assTS, _ := parseTS(msg.Timestamp)
 		var contentItems []claudeContentItem
 		if len(msg.Message.Content) > 0 && msg.Message.Content[0] == '[' {
-			json.Unmarshal(msg.Message.Content, &contentItems) // best-effort; nil on failure
+			_ = json.Unmarshal(msg.Message.Content, &contentItems) // best-effort; nil on failure
 		}
 
 		idx, exists := msgIndexByID[msg.Message.ID]

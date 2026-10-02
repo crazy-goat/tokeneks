@@ -244,38 +244,6 @@ func ocSessionSummary(steps []ocStep) (compute.Summary, []unpricedModel, bool) {
 	return summary, unpriced, anyPriced
 }
 
-func ocToolCalls(sessionID string) (int, error) {
-	db, err := openOCDB()
-	if err != nil {
-		return 0, err
-	}
-
-	var count int
-	err = db.QueryRow(`
-		SELECT COUNT(*) FROM part 
-		WHERE session_id = ?
-		AND json_extract(data, '$.type') = 'tool'
-	`, sessionID).Scan(&count)
-	return count, err
-}
-
-// ocSessionCost has no callers anywhere in this codebase as of this change
-// (confirmed by grep) — kept for now rather than deleted since removing a
-// package-private helper isn't this task's job, but brought in line with
-// ocSessionSummary's logged-preferring Actual so it doesn't silently
-// reintroduce the rate-table-only bug if something starts calling it again.
-func ocSessionCost(sessionID, model string) (float64, error) {
-	steps, err := ocSteps(sessionID)
-	if err != nil {
-		return 0, err
-	}
-	prices, ok := resolveAgentPrices("opencode", model)
-	if !ok {
-		return 0, fmt.Errorf("no price configured for model %s", model)
-	}
-	return ocActualCost(steps, prices), nil
-}
-
 type ocSession struct {
 	ID               string
 	Title            string

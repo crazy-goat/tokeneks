@@ -88,7 +88,7 @@ func TestDashboardWindowMs_CalendarAnchoredWhenStartEndGiven(t *testing.T) {
 	// and inclusive-end mistake the store's last_activity comparisons must
 	// not make.
 	lastMomentOfEndDate := time.Date(2026, 6, 3, 23, 59, 59, 0, time.Local).UnixMilli()
-	if !(lastMomentOfEndDate >= fromMs && lastMomentOfEndDate < toMs) {
+	if lastMomentOfEndDate < fromMs || lastMomentOfEndDate >= toMs {
 		t.Errorf("23:59:59 on the end date is not inside [%d, %d)", fromMs, toMs)
 	}
 }

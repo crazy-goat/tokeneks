@@ -2,13 +2,14 @@ package ingest
 
 import (
 	"context"
-	"github.com/fsnotify/fsnotify"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 	"tokeneks/store"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 // echoParser returns a session with one user message and the given content.
@@ -72,7 +73,7 @@ func TestWatcher_InitialSync_IngestsAndEmits(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go w.Run(ctx)
+	go func() { _ = w.Run(ctx) }()
 
 	// wait for events
 	events := collectEvents(w.Events(), 2, 3*time.Second)
@@ -167,7 +168,7 @@ func TestWatcher_InitialSync_SkipsUnchangedSession(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go w.Run(ctx)
+	go func() { _ = w.Run(ctx) }()
 
 	if events := collectEvents(w.Events(), 1, 500*time.Millisecond); len(events) != 0 {
 		t.Fatalf("initial events = %d, want 0 (nothing changed)", len(events))
@@ -199,7 +200,7 @@ func TestWatcher_InitialSync_ReingestsChangedSession(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go w.Run(ctx)
+	go func() { _ = w.Run(ctx) }()
 	if events := collectEvents(w.Events(), 1, time.Second); len(events) != 1 {
 		t.Fatalf("initial events = %d, want 1", len(events))
 	}
@@ -259,7 +260,7 @@ func TestWatcher_FileChange_Reingests(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go w.Run(ctx)
+	go func() { _ = w.Run(ctx) }()
 
 	// initial event
 	collectEvents(w.Events(), 1, 2*time.Second)
@@ -317,7 +318,7 @@ func TestWatcher_FileRemove_KeepsSessionEmitsEvent(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go w.Run(ctx)
+	go func() { _ = w.Run(ctx) }()
 	collectEvents(w.Events(), 1, 2*time.Second) // initial
 
 	n, _ := st.CountSessions(context.Background(), "claude")
@@ -361,7 +362,7 @@ func TestWatcher_Debounce_CoalescesEvents(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go w.Run(ctx)
+	go func() { _ = w.Run(ctx) }()
 	collectEvents(w.Events(), 1, 2*time.Second) // initial
 
 	// hammer the file

@@ -165,18 +165,6 @@ func piSessionUsage(fp string) (piSessionData, error) {
 	return data, scanner.Err()
 }
 
-func piMessages(fp string) ([]compute.StepData, error) {
-	data, err := piSessionUsage(fp)
-	if err != nil {
-		return nil, err
-	}
-	steps := make([]compute.StepData, 0, len(data.Steps))
-	for _, step := range data.Steps {
-		steps = append(steps, step.Step)
-	}
-	return steps, nil
-}
-
 type piSession struct {
 	ID            string
 	Filepath      string
@@ -505,9 +493,7 @@ func cleanProjectName(dirName string) string {
 	if home, err := os.UserHomeDir(); err == nil {
 		user := filepath.Base(home)
 		prefix := "Users-" + user + "-"
-		if strings.HasPrefix(name, prefix) {
-			name = name[len(prefix):]
-		}
+		name = strings.TrimPrefix(name, prefix)
 	}
 	if name == "" {
 		return "(root)"

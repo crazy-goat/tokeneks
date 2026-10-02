@@ -193,39 +193,6 @@ func resetResolvedPrices() {
 	resolvePricesTbl = resolvedPriceTables{}
 }
 
-// storeModelPricesMap reads every row for one provider out of the store and
-// converts it to a plain model->price map. Returns nil (not an error) when
-// the store is unavailable or the provider has no rows — every caller here
-// treats that as "this layer has nothing to say," identical to a genuine
-// miss.
-func storeModelPricesMap(provider string) map[string]compute.ModelPrices {
-	st := getTokeneksStore()
-	if st == nil {
-		var err error
-		st, err = openTokeneksStore()
-		if err != nil {
-			return nil
-		}
-		setTokeneksStore(st)
-	}
-	rows, err := st.GetModelPrices(context.Background(), provider)
-	if err != nil || len(rows) == 0 {
-		return nil
-	}
-	out := make(map[string]compute.ModelPrices, len(rows))
-	for _, r := range rows {
-		out[r.Model] = compute.ModelPrices{
-			Input:                 r.Input,
-			Output:                r.Output,
-			CacheRead:             r.CacheRead,
-			CacheCreation:         r.CacheWrite,
-			CacheCreation1h:       r.CacheWrite1h,
-			SupportsCacheCreation: r.CacheWrite > 0,
-		}
-	}
-	return out
-}
-
 // storeModelPriceWindows reads every row for one provider out of the store
 // and groups them by model into ordered (oldest-first) dated windows — the
 // derived layer's analogue of storeModelPricesMap. Unlike a models.dev sync

@@ -838,7 +838,7 @@ func claudeDetailFromStore(sessionID string, notFound error) error {
 	}
 	steps := stepsFromAssistantMessages(msgs)
 	if len(steps) == 0 {
-		return fmt.Errorf("Claude session %s is in the store but has no assistant messages recorded", sessionID)
+		return fmt.Errorf("claude session %s is in the store but has no assistant messages recorded", sessionID)
 	}
 
 	spec := buildPricingSpecs()["claude"]
