@@ -348,10 +348,10 @@ async function load() {
     ? ` <span class="unpriced-flag" title="${(d.unpricedTokens || 0).toLocaleString()} tokens have no resolvable rate — Ideal/Overpay are a lower bound, not a measured figure">⚠</span>`
     : '';
   meta.innerHTML = `
-    <span>Agent: ${d.agent}</span>
-    <span>Model: ${d.model || '–'}</span>
-    <span>Date: ${d.date}</span>
-    <span>Duration: ${d.duration || '–'}</span>
+    <span>Agent: ${escHtml(d.agent)}</span>
+    <span>Model: ${escHtml(d.model || '–')}</span>
+    <span>Date: ${escHtml(d.date)}</span>
+    <span>Duration: ${escHtml(d.duration || '–')}</span>
     <span>Steps: ${d.steps.length}</span>
     <span>Paid: $${d.totalCost.toFixed(4)}</span>
     <span>Ideal: $${(d.ideal || 0).toFixed(4)}</span>
