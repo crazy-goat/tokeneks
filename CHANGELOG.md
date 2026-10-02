@@ -18,6 +18,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 - Lint findings fixed: a few unchecked errors, a capitalized error string, simplified conditions
 
-
 ### Removed
 - Unused internal helpers (`fileMTime`, `dbFileMTime`, `nowMs`, `ocToolCalls`, `ocSessionCost`, `piMessages`, `storeModelPricesMap`)

@@ -66,7 +66,8 @@ and `checksums.txt`. The version is not stored in the source tree.
 
 - Conventional Commits. Scopes: `web`, `store`, `ingest`, `compute`, `prices`, `claude`,
   `opencode`, `pi`, `docs`, `ci`. Example: `fix(store): roll back on failed insert (#12)`.
-- `errcheck` stays on. Best-effort cleanup calls (`Close`, `Rollback`, `fmt.Fprint*`,
-  `ResponseWriter.Write`, `Encoder.Encode`) are excluded by name in `.golangci.yml`; handle
-  every other error that changes behaviour.
+- `errcheck` stays on. Only `Close` on `io.Closer`, `sql.DB`, `sql.Rows` and `sql.Stmt` is
+  excluded in `.golangci.yml`. Every other ignored error is explicit: `_ = x.Close()`,
+  `_, _ = w.Write(...)`, `defer func() { _ = tx.Rollback() }()`. Handle errors that change
+  behaviour (check `Close` after writes).
 - Milestone numbers are not versions. Use the milestone title (`vX.Y.Z`).
