@@ -34,6 +34,29 @@ func newJSONLScanner(r io.Reader) *bufio.Scanner {
 	return scanner
 }
 
+var (
+	skippedLinesWarnMu  sync.Mutex
+	skippedLinesWarned            = map[string]int{}
+	skippedLinesWarnOut io.Writer = os.Stderr
+)
+
+// warnSkippedLines reports that n unparseable lines of source were left out of
+// the totals, so corrupted or half-written session data does not vanish
+// silently. Sessions are re-read many times (list, detail, web refresh), so a
+// source is warned about once per distinct count.
+func warnSkippedLines(source string, n int) {
+	if n == 0 {
+		return
+	}
+	skippedLinesWarnMu.Lock()
+	defer skippedLinesWarnMu.Unlock()
+	if skippedLinesWarned[source] == n {
+		return
+	}
+	skippedLinesWarned[source] = n
+	_, _ = fmt.Fprintf(skippedLinesWarnOut, "warning: skipped %d unparseable line(s) in %s; its totals may be incomplete\n", n, source)
+}
+
 // walkSessionFiles walks sessionsDir looking for .jsonl files in subdirectories.
 // For each matching file, it calls fn with the file path and file info.
 func walkSessionFiles(sessionsDir string, fn func(path string, info os.FileInfo) error) error {

@@ -65,10 +65,13 @@ func claudeSessionDetail(fp string) (*SessionDetail, error) {
 	}
 
 	scanner := newJSONLScanner(f)
+	skipped := 0
+	defer func() { warnSkippedLines(fp, skipped) }()
 
 	for scanner.Scan() {
 		var msg claudeDetMsg
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+			skipped++
 			continue
 		}
 		if project == "" && msg.Cwd != "" {

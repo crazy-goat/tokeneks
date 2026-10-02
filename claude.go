@@ -426,10 +426,13 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 	// blocks got its usage counted N times — see the bug this fixes.
 	stepIndexByID := make(map[string]int)
 	scanner := newJSONLScanner(f)
+	skipped := 0
+	defer func() { warnSkippedLines(fp, skipped) }()
 
 	for scanner.Scan() {
 		var msg claudeMessage
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+			skipped++
 			continue
 		}
 		ts, tsErr := parseTimestamp(msg.Timestamp)
