@@ -284,13 +284,13 @@ func runWeb(port string, days int) error {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "private, max-age=30")
 		body, err := json.Marshal(sessions)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, max-age=30")
 		_, _ = w.Write(append(body, '\n'))
 	})
 

@@ -404,13 +404,13 @@ func handleAPISessionDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if revision, err := sessionRevisionFromStore(r.Context(), agent, id); err == nil {
-		w.Header().Set("X-Session-Revision", revision)
-	}
 	body, err := json.Marshal(detail)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if revision, err := sessionRevisionFromStore(r.Context(), agent, id); err == nil {
+		w.Header().Set("X-Session-Revision", revision)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
