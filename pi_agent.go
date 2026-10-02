@@ -99,10 +99,13 @@ func piSessionUsage(fp string) (piSessionData, error) {
 	data.ModelProviders = make(map[string]string)
 	modelCounts := make(map[string]int)
 	scanner := newJSONLScanner(f)
+	skipped := 0
+	defer func() { warnSkippedLines(fp, skipped) }()
 
 	for scanner.Scan() {
 		var entry piMessageEntry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			skipped++
 			continue
 		}
 		ts, tsErr := parseTimestamp(entry.Timestamp)

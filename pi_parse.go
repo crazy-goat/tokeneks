@@ -56,10 +56,13 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 	}
 
 	scanner := newJSONLScanner(f)
+	skipped := 0
+	defer func() { warnSkippedLines(fp, skipped) }()
 
 	for scanner.Scan() {
 		var entry piDetEntry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			skipped++
 			continue
 		}
 		if entry.Type != "message" {

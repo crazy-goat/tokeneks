@@ -64,6 +64,9 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 	}
 	defer rows.Close()
 
+	skipped := 0
+	defer func() { warnSkippedLines("OpenCode session "+sessionID, skipped) }()
+
 	var steps []StepInfo
 	curIdx := -1
 	msgToStepIdx := make(map[string]int)
@@ -106,6 +109,7 @@ func ocSessionDetail(sessionID string) (*SessionDetail, error) {
 		}
 		var part ocPart
 		if err := json.Unmarshal([]byte(raw), &part); err != nil {
+			skipped++
 			continue
 		}
 		role := msgRole[msgID]
