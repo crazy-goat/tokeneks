@@ -119,7 +119,7 @@ func TestComputeIdealClaude_IdealInRemoved(t *testing.T) {
 	}
 	os.Stdout = w
 	printDetailRows(rows, uniformDetailPricing(len(rows), "claude-test-model", prices), true)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
@@ -454,7 +454,7 @@ func TestPrintDetailRows_ShowsPerRowModel(t *testing.T) {
 	}
 	os.Stdout = w
 	printDetailRows(rows, pricing, true)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
@@ -546,7 +546,7 @@ func TestPrintDetailRows_WidensTable_WhenCallerPassesShowCCFalseButRowsHaveCache
 	// whether the session actually wrote to cache before deciding the table
 	// shape.
 	printDetailRows(rows, pricing, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer

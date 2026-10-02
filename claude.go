@@ -159,7 +159,7 @@ func warnUnknownClaudeModel(model string) {
 		return
 	}
 	claudeUnknownWarned[model] = true
-	fmt.Fprintf(claudeUnknownWarnOut, "warning: no price for Claude model %q; its tokens are excluded from cost\n", model)
+	_, _ = fmt.Fprintf(claudeUnknownWarnOut, "warning: no price for Claude model %q; its tokens are excluded from cost\n", model)
 }
 
 // resetClaudeUnknownWarnings clears the warned-once set. Test-only: without
@@ -412,7 +412,7 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 	if err != nil {
 		return claudeMessageResult{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var steps []claudeSessionStep
 	var models []string
@@ -838,7 +838,7 @@ func claudeDetailFromStore(sessionID string, notFound error) error {
 	}
 	steps := stepsFromAssistantMessages(msgs)
 	if len(steps) == 0 {
-		return fmt.Errorf("Claude session %s is in the store but has no assistant messages recorded", sessionID)
+		return fmt.Errorf("session %s (Claude) is in the store but has no assistant messages recorded", sessionID)
 	}
 
 	spec := buildPricingSpecs()["claude"]

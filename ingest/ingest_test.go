@@ -82,7 +82,9 @@ func TestJSONLMarker(t *testing.T) {
 	if _, err := f.WriteString("{\"type\":\"summary\"}\n"); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if grown := jsonlMarker(path, nil); grown == first {
 		t.Fatalf("jsonlMarker() unchanged after append: %d", grown)
 	}

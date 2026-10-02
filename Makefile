@@ -9,3 +9,6 @@ web:
 
 test:
 	go test ./...
+
+lint:
+	bin/lint.sh

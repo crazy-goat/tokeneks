@@ -9,8 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"tokeneks/store"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 // ChangeKind describes how a session's underlying source changed.
@@ -128,7 +129,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 	w.fsw = fsw
 	w.mu.Unlock()
-	defer fsw.Close()
+	defer func() { _ = fsw.Close() }()
 
 	// Set up filesystem watches before the initial ingest so that any
 	// changes arriving while we are parsing are caught by fsnotify and
@@ -330,7 +331,7 @@ func (w *Watcher) watchOpenCode(ctx context.Context, src Source) {
 		w.pollOpenCodeByTicker(ctx, src)
 		return
 	}
-	defer fsw.Close()
+	defer func() { _ = fsw.Close() }()
 
 	if err := fsw.Add(dbDir); err != nil {
 		w.log.Printf("opencode: cannot watch %s (%v); falling back to poll", dbDir, err)
@@ -484,5 +485,3 @@ func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
 }
-
-func nowMs() int64 { return time.Now().UnixMilli() }

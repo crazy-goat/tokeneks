@@ -206,28 +206,6 @@ func (s *piSource) Discover(ctx context.Context) ([]SessionRef, error) {
 	return refs, nil
 }
 
-func fileMTime(path string) int64 {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	return info.ModTime().UnixMilli()
-}
-
-// dbFileMTime returns the most recent modification time across a SQLite
-// database file and its WAL/SHM sidecars. OpenCode uses WAL mode: new writes
-// land in the -wal file before being checkpointed into the main db, so
-// watching only the main file misses updates that are still in the WAL.
-func dbFileMTime(path string) int64 {
-	t := fileMTime(path)
-	for _, suf := range []string{"-wal", "-shm"} {
-		if mt := fileMTime(path + suf); mt > t {
-			t = mt
-		}
-	}
-	return t
-}
-
 // jsonlMarker returns a per-file change marker for an append-only JSONL
 // session log: an FNV-1a hash of (size, mtime-in-ns). The skip filter
 // compares markers for inequality, so the value only has to change when

@@ -381,8 +381,8 @@ func TestGetCreatedAtFromInfo_UsesProvidedInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	_ = tmpFile.Close()
 
 	info, err := os.Stat(tmpFile.Name())
 	if err != nil {

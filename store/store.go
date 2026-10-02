@@ -179,7 +179,7 @@ func migrateModelPriceEffectiveWindow(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmts := []string{
 		`ALTER TABLE model_price RENAME TO model_price_old`,

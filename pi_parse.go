@@ -18,7 +18,7 @@ func piSessionDetail(fp string) (*SessionDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	type piDetEntry struct {
 		Type      string `json:"type"`

@@ -1,0 +1,15 @@
+version: "2"
+linters:
+  default: standard
+  settings:
+    errcheck:
+      # Closes of read-only resources, whose errors carry no useful information.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Stmt).Close
+formatters:
+  enable:
+    - gofmt
+    - goimports

@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, runner: ubuntu-latest }
+          - { goos: linux, goarch: arm64, runner: ubuntu-24.04-arm }
+          - { goos: darwin, goarch: amd64, runner: macos-15-intel }
+          - { goos: darwin, goarch: arm64, runner: macos-latest }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build
+        # go-sqlite3 needs cgo, so every target is built on a native runner.
+        env:
+          CGO_ENABLED: '1'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" -o "dist/tokeneks_${GOOS}_${GOARCH}" .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tokeneks_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/tokeneks_*
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Extract release notes from CHANGELOG.md
+        # Reads CHANGELOG.md from the tagged commit: merge the `## [X.Y.Z]` section before tagging.
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            /^## \[/ { found = (index($0, "[" v "]") > 0 || index($0, "[v" v "]") > 0); next }
+            found
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no non-empty section for ${version}"
+            exit 1
+          fi
+          # GitHub rejects release bodies of 125000 characters or more.
+          if [ "$(wc -m < release-notes.md)" -ge 120000 ]; then
+            head -c 119000 release-notes.md > release-notes.tmp
+            printf '\n\n_Release notes truncated, see CHANGELOG.md._\n' >> release-notes.tmp
+            mv release-notes.tmp release-notes.md
+          fi
+
+      - name: Download binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tokeneks_*
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum tokeneks_* > checksums.txt)
+          flags=()
+          case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-tag \
+            "${flags[@]}" \
+            dist/tokeneks_* dist/checksums.txt

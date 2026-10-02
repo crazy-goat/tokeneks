@@ -75,7 +75,7 @@ func TestMigrate_AddsCacheWrite1hColumn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open on pre-migration db: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	msgs, err := st.GetMessages(context.Background(), "claude", "s1")
 	if err != nil {
@@ -133,7 +133,7 @@ func TestMigrate_AddsModelPriceEffectiveWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open on pre-migration db: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	prices, err := st.GetModelPrices(context.Background(), "anthropic")
 	if err != nil {
@@ -159,7 +159,7 @@ func TestMigrate_AddsModelPriceEffectiveWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Open (idempotency): %v", err)
 	}
-	defer st2.Close()
+	defer func() { _ = st2.Close() }()
 	prices2, err := st2.GetModelPrices(context.Background(), "anthropic")
 	if err != nil {
 		t.Fatalf("GetModelPrices after second Open: %v", err)

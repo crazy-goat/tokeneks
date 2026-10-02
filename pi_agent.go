@@ -93,7 +93,7 @@ func piSessionUsage(fp string) (piSessionData, error) {
 	if err != nil {
 		return piSessionData{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var data piSessionData
 	data.ModelProviders = make(map[string]string)
@@ -163,18 +163,6 @@ func piSessionUsage(fp string) (piSessionData, error) {
 	data.DominantModel = dominantModel(modelCounts)
 
 	return data, scanner.Err()
-}
-
-func piMessages(fp string) ([]compute.StepData, error) {
-	data, err := piSessionUsage(fp)
-	if err != nil {
-		return nil, err
-	}
-	steps := make([]compute.StepData, 0, len(data.Steps))
-	for _, step := range data.Steps {
-		steps = append(steps, step.Step)
-	}
-	return steps, nil
 }
 
 type piSession struct {
@@ -421,7 +409,7 @@ func piSessionHeaderParent(fp string) (parentPath, parentID string, ok bool) {
 	if err != nil {
 		return "", "", false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := newJSONLScanner(f)
 	if !scanner.Scan() {
@@ -505,9 +493,7 @@ func cleanProjectName(dirName string) string {
 	if home, err := os.UserHomeDir(); err == nil {
 		user := filepath.Base(home)
 		prefix := "Users-" + user + "-"
-		if strings.HasPrefix(name, prefix) {
-			name = name[len(prefix):]
-		}
+		name = strings.TrimPrefix(name, prefix)
 	}
 	if name == "" {
 		return "(root)"

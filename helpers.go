@@ -11,8 +11,9 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"tokeneks/compute"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 const (
