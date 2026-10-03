@@ -378,9 +378,7 @@ type claudeMessage struct {
 				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
 			} `json:"cache_creation"`
 		} `json:"usage"`
-		Content []struct {
-			Type string `json:"type"`
-		} `json:"content"`
+		Content json.RawMessage `json:"content"`
 	} `json:"message"`
 	Timestamp string `json:"timestamp"`
 	SessionID string `json:"sessionId"`
@@ -439,8 +437,33 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 		if tsErr == nil && ts.After(lastActivity) {
 			lastActivity = ts
 		}
+		var content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
 		if msg.Type == "user" {
+			var prompt string
+			if err := json.Unmarshal(msg.Message.Content, &prompt); err != nil {
+				if err := json.Unmarshal(msg.Message.Content, &content); err == nil {
+					var texts []string
+					for _, block := range content {
+						if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+							texts = append(texts, block.Text)
+						}
+					}
+					prompt = strings.Join(texts, "\n")
+				}
+			}
+			if prompt = strings.TrimSpace(prompt); prompt != "" {
+				lastUserPrompt = prompt
+			}
 			continue
+		}
+		if len(msg.Message.Content) > 0 {
+			if err := json.Unmarshal(msg.Message.Content, &content); err != nil {
+				skipped++
+				continue
+			}
 		}
 		if msg.Type != "assistant" || msg.Message.Model == "" {
 			continue
@@ -459,7 +482,7 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 		// this line ends up creating a step or merging into one — a message
 		// split across three lines with one tool_use block each must still
 		// report three tool calls after dedup.
-		for _, c := range msg.Message.Content {
+		for _, c := range content {
 			if c.Type == "tool_use" {
 				toolCalls++
 			}
