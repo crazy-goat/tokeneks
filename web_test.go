@@ -17,6 +17,23 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+func TestWebPagesUseEmbeddedChartJS(t *testing.T) {
+	const script = `<script src="/static/chart.umd.min.js"></script>`
+	for name, page := range map[string][]byte{"index": webIndexHTML, "detail": webDetailHTML} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(string(page), script) {
+				t.Error("page must load the embedded Chart.js endpoint")
+			}
+			if strings.Contains(string(page), "cdn.jsdelivr.net") {
+				t.Error("page must not depend on the Chart.js CDN")
+			}
+		})
+	}
+	if len(chartJS) == 0 {
+		t.Error("embedded Chart.js asset is empty")
+	}
+}
+
 func resetOCDBForTest(t *testing.T) {
 	t.Helper()
 	ocDBMu.Lock()

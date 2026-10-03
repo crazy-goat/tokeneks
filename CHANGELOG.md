@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The session detail page loads the embedded Chart.js asset instead of a CDN, so charts work offline and use the same version as the dashboard (#74)
 - The session detail page escapes the agent, model, date and duration values in the meta section before inserting them as HTML (#77)
 - Unparseable JSONL lines (and OpenCode parts) are no longer dropped silently: the Claude and PI readers and the OpenCode detail reader now print a `warning: skipped N unparseable line(s) in <source>` message to stderr (again only when the count grows) (#52)
 
