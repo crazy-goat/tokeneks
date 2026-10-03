@@ -205,6 +205,54 @@ func claudeLine(id, model string, input, output int, content string) string {
 		`},"content":` + content + `},"timestamp":"2026-08-03T16:00:00.000Z"}`
 }
 
+func TestClaudeSessions_AcceptsNonUUIDFilenames(t *testing.T) {
+	base := t.TempDir()
+	prev := defaultClaudeSessions
+	defaultClaudeSessions = base
+	t.Cleanup(func() { defaultClaudeSessions = prev })
+	projectDir := filepath.Join(base, "project")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := claudeLine("msg1", "claude-sonnet-5", 100, 50, `[{"type":"text"}]`) + "\n"
+	for name, content := range map[string]string{
+		"s.jsonl": line,
+		"a-long-session-name-that-is-not-a-uuid.jsonl": line,
+		"11111111-1111-1111-1111-111111111111.jsonl":   line,
+		"ignored.txt":     line,
+		"empty.jsonl":     "",
+		"user-only.jsonl": `{"type":"user","message":{"content":"prompt"}}` + "\n",
+	} {
+		if err := os.WriteFile(filepath.Join(projectDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := claudeSessions(3650, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"s":                                      true,
+		"a-long-session-name-that-is-not-a-uuid": true,
+		"11111111-1111-1111-1111-111111111111":   true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("sessions = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for _, session := range got {
+		if !want[session.ID] {
+			t.Errorf("unexpected session ID %q", session.ID)
+		}
+		if session.Msgs != 1 || session.Data == nil || len(session.Data.Steps) != 1 {
+			t.Errorf("valid session content was not retained: %+v", session)
+		}
+		delete(want, session.ID)
+	}
+	if len(want) != 0 {
+		t.Errorf("missing session IDs: %v", want)
+	}
+}
+
 func TestClaudeMessages_LastUserPrompt(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
