@@ -205,6 +205,39 @@ func claudeLine(id, model string, input, output int, content string) string {
 		`},"content":` + content + `},"timestamp":"2026-08-03T16:00:00.000Z"}`
 }
 
+func TestClaudeMessages_LastUserPrompt(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"string", `"  latest prompt  "`, "latest prompt"},
+		{"text blocks", `[{"type":"text","text":"latest"},{"type":"image"},{"type":"text","text":"prompt"}]`, "latest\nprompt"},
+		{"tool result", `[{"type":"tool_result","content":"not a prompt"}]`, "first prompt"},
+		{"empty", `"  "`, "first prompt"},
+		{"null", `null`, "first prompt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeClaudeJSONL(t, []string{
+				`{"type":"user","message":{"content":[{"type":"text","text":"first prompt"}]}}`,
+				`{"type":"user","message":{"content":` + tc.content + `}}`,
+				claudeLine("msg1", "claude-sonnet-5", 100, 50, `[{"type":"tool_use"}]`),
+				`{"type":"user","message":{"content":[{"type":"tool_result","content":"done"}]}}`,
+			})
+			res, err := claudeMessages(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.LastUserPrompt != tc.want {
+				t.Errorf("LastUserPrompt = %q, want %q", res.LastUserPrompt, tc.want)
+			}
+			if len(res.Steps) != 1 || res.ToolCalls != 1 {
+				t.Errorf("assistant accounting changed: %+v", res)
+			}
+		})
+	}
+}
+
 func TestClaudeMessages_MultiBlockSameID_CountsUsageOnce(t *testing.T) {
 	// Claude Code writes one line per content block; a thinking block, a
 	// text block, and a tool call from the same assistant turn all repeat
