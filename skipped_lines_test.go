@@ -41,6 +41,29 @@ func TestWarnSkippedLines_OncePerCount(t *testing.T) {
 	}
 }
 
+func TestClaudeMessages_MalformedContentDoesNotUpdateActivity(t *testing.T) {
+	for _, role := range []string{"user", "assistant"} {
+		t.Run(role, func(t *testing.T) {
+			buf := captureSkippedWarnings(t)
+			path := writeClaudeJSONL(t, []string{
+				`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"content":"prompt"}}`,
+				`{"type":"user","timestamp":"2026-01-02T00:00:00Z","message":{"content":[{"type":"tool_result"}]}}`,
+				`{"type":"` + role + `","timestamp":"2026-01-03T00:00:00Z","message":{"content":{}}}`,
+			})
+			res, err := claudeMessages(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := res.LastActivity.Format("2006-01-02T15:04:05Z07:00"); got != "2026-01-02T00:00:00Z" {
+				t.Errorf("LastActivity = %s, want accepted tool-result timestamp", got)
+			}
+			if !strings.Contains(buf.String(), "skipped 1 unparseable line(s) in "+path) {
+				t.Fatalf("missing warning: %q", buf.String())
+			}
+		})
+	}
+}
+
 func TestClaudeMessages_WarnOnMalformedUserContent(t *testing.T) {
 	for _, content := range []string{`{}`, `42`, `[{"type":"text","text":42}]`} {
 		t.Run(content, func(t *testing.T) {

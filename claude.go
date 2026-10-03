@@ -433,10 +433,6 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 			skipped++
 			continue
 		}
-		ts, tsErr := parseTimestamp(msg.Timestamp)
-		if tsErr == nil && ts.After(lastActivity) {
-			lastActivity = ts
-		}
 		var content []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
@@ -461,13 +457,15 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 			if prompt = strings.TrimSpace(prompt); prompt != "" {
 				lastUserPrompt = prompt
 			}
-			continue
-		}
-		if len(msg.Message.Content) > 0 {
+		} else if len(msg.Message.Content) > 0 {
 			if err := json.Unmarshal(msg.Message.Content, &content); err != nil {
 				skipped++
 				continue
 			}
+		}
+		ts, tsErr := parseTimestamp(msg.Timestamp)
+		if tsErr == nil && ts.After(lastActivity) {
+			lastActivity = ts
 		}
 		if msg.Type != "assistant" || msg.Message.Model == "" {
 			continue
