@@ -17,6 +17,19 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+func TestValidatePort(t *testing.T) {
+	for _, valid := range []string{"1", "8080", "65535"} {
+		if err := validatePort(valid); err != nil {
+			t.Errorf("validatePort(%q) = %v, want nil", valid, err)
+		}
+	}
+	for _, invalid := range []string{"", "abc", "0", "-1", "65536", "8080 ", " 8080", "80x"} {
+		if err := validatePort(invalid); err == nil {
+			t.Errorf("validatePort(%q) = nil, want error", invalid)
+		}
+	}
+}
+
 func TestWebPagesUseEmbeddedChartJS(t *testing.T) {
 	const script = `<script src="/static/chart.umd.min.js"></script>`
 	for name, page := range map[string][]byte{"index": webIndexHTML, "detail": webDetailHTML} {
