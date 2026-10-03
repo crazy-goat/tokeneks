@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The session detail page loads the embedded Chart.js asset instead of a CDN, so charts work offline and use the same version as the dashboard (#74)
 - The session detail page escapes the agent, model, date and duration values in the meta section before inserting them as HTML (#77)
 - Unparseable JSONL lines (and OpenCode parts) are no longer dropped silently: the Claude and PI readers and the OpenCode detail reader now print a `warning: skipped N unparseable line(s) in <source>` message to stderr (again only when the count grows) (#52)
+- The web dashboard validates the `--port` value before starting the server and reports a clear error for non-numeric or out-of-range ports, instead of failing later with a confusing listen error (#76)
 
 ## [0.1.0] - 2026-10-02
 

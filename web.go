@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 	"tokeneks/ingest"
@@ -210,7 +212,18 @@ func dashboardWindowMs(days int, start, end string) (fromMs, toMs int64) {
 	return fromMs, toMs
 }
 
+func validatePort(port string) error {
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("invalid port %q: must be an integer between 1 and 65535", port)
+	}
+	return nil
+}
+
 func runWeb(port string, days int) error {
+	if err := validatePort(port); err != nil {
+		return err
+	}
 	st, err := openTokeneksStore()
 	if err != nil {
 		return err
@@ -300,7 +313,7 @@ func runWeb(port string, days int) error {
 	mux.HandleFunc("/api/session-stream/", handleAPISessionStream)
 
 	fmt.Printf("Web dashboard running on http://localhost:%s\n", port)
-	return http.ListenAndServe(":"+port, mux)
+	return http.ListenAndServe(net.JoinHostPort("", port), mux)
 }
 
 func handleAPISessionsStream(w http.ResponseWriter, r *http.Request) {
