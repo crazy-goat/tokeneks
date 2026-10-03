@@ -443,8 +443,12 @@ func claudeMessages(fp string) (claudeMessageResult, error) {
 		}
 		if msg.Type == "user" {
 			var prompt string
-			if err := json.Unmarshal(msg.Message.Content, &prompt); err != nil {
-				if err := json.Unmarshal(msg.Message.Content, &content); err == nil {
+			if len(msg.Message.Content) > 0 {
+				if err := json.Unmarshal(msg.Message.Content, &prompt); err != nil {
+					if err := json.Unmarshal(msg.Message.Content, &content); err != nil {
+						skipped++
+						continue
+					}
 					var texts []string
 					for _, block := range content {
 						if block.Type == "text" && strings.TrimSpace(block.Text) != "" {

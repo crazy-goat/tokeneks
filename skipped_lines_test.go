@@ -41,6 +41,31 @@ func TestWarnSkippedLines_OncePerCount(t *testing.T) {
 	}
 }
 
+func TestClaudeMessages_WarnOnMalformedUserContent(t *testing.T) {
+	for _, content := range []string{`{}`, `42`, `[{"type":"text","text":42}]`} {
+		t.Run(content, func(t *testing.T) {
+			buf := captureSkippedWarnings(t)
+			path := writeClaudeJSONL(t, []string{
+				`{"type":"user","message":{"content":"valid prompt"}}`,
+				`{"type":"user","message":{"content":` + content + `}}`,
+				`{"type":"user","message":{"content":null}}`,
+				`{"type":"user","message":{}}`,
+				`{"type":"user","message":{"content":[{"type":"tool_result","content":"done"}]}}`,
+			})
+			res, err := claudeMessages(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.LastUserPrompt != "valid prompt" {
+				t.Errorf("LastUserPrompt = %q, want valid prompt", res.LastUserPrompt)
+			}
+			if !strings.Contains(buf.String(), "skipped 1 unparseable line(s) in "+path) {
+				t.Fatalf("missing warning: %q", buf.String())
+			}
+		})
+	}
+}
+
 func TestSessionParsers_WarnOnCorruptLines(t *testing.T) {
 	good := `{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"input_tokens":1,"output_tokens":1}}}`
 	cases := map[string]func(string){
