@@ -18,15 +18,55 @@ import (
 )
 
 func TestValidatePort(t *testing.T) {
-	for _, valid := range []string{"1", "8080", "65535"} {
-		if err := validatePort(valid); err != nil {
-			t.Errorf("validatePort(%q) = %v, want nil", valid, err)
-		}
+	// Every accepted and rejected row of the boundary audit of issue #94, so a
+	// future change to validatePort has to make a deliberate decision.
+	cases := []struct {
+		name    string
+		port    string
+		wantErr bool
+	}{
+		{name: "lowest accepted port", port: "1"},
+		{name: "typical port", port: "8080"},
+		{name: "highest accepted port", port: "65535"},
+		// Leading zeros stay accepted: "0080" is a plain decimal number in
+		// range, and the printed URL http://localhost:0080 opens port 80.
+		{name: "leading zeros", port: "0080"},
+		{name: "empty", port: "", wantErr: true},
+		{name: "zero", port: "0", wantErr: true},
+		{name: "above range", port: "65536", wantErr: true},
+		{name: "negative", port: "-1", wantErr: true},
+		{name: "negative zero", port: "-0", wantErr: true},
+		{name: "letters", port: "abc", wantErr: true},
+		{name: "digits then letters", port: "80x", wantErr: true},
+		{name: "decimal point", port: "8080.0", wantErr: true},
+		{name: "hexadecimal notation", port: "0x50", wantErr: true},
+		{name: "digit separator", port: "1_0", wantErr: true},
+		{name: "leading space", port: " 8080", wantErr: true},
+		{name: "trailing space", port: "8080 ", wantErr: true},
+		{name: "trailing newline", port: "8080\n", wantErr: true},
+		{name: "trailing tab", port: "8080\t", wantErr: true},
+		// A leading plus is a typo that net.Listen accepts (":+8080" binds
+		// port 8080) but that no client can open, so it is rejected (#94).
+		{name: "leading plus", port: "+8080", wantErr: true},
+		{name: "leading plus on the lowest accepted port", port: "+1", wantErr: true},
 	}
-	for _, invalid := range []string{"", "abc", "0", "-1", "65536", "8080 ", " 8080", "80x"} {
-		if err := validatePort(invalid); err == nil {
-			t.Errorf("validatePort(%q) = nil, want error", invalid)
-		}
+	const wantMsg = "must be an integer between 1 and 65535"
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePort(tc.port)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("validatePort(%q) = nil, want error", tc.port)
+				}
+				if !strings.Contains(err.Error(), wantMsg) {
+					t.Errorf("validatePort(%q) error = %q, want it to contain %q", tc.port, err, wantMsg)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("validatePort(%q) = %v, want nil", tc.port, err)
+			}
+		})
 	}
 }
 

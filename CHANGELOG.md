@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The session detail page escapes the agent, model, date and duration values in the meta section before inserting them as HTML (#77)
 - Unparseable JSONL lines (and OpenCode parts) are no longer dropped silently: the Claude and PI readers and the OpenCode detail reader now print a `warning: skipped N unparseable line(s) in <source>` message to stderr (again only when the count grows) (#52)
 - The web dashboard validates the `--port` value before starting the server and reports a clear error for non-numeric or out-of-range ports, instead of failing later with a confusing listen error (#76)
+- The web dashboard rejects a `--port` value with a leading `+` (`--port +8080`), which used to start the server and then print the unopenable URL `http://localhost:+8080`; only plain decimal digits are accepted now, leading zeros (`--port 0080`) still are (#94)
 
 ## [0.1.0] - 2026-10-02
 
