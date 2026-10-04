@@ -212,12 +212,27 @@ func dashboardWindowMs(days int, start, end string) (fromMs, toMs int64) {
 	return fromMs, toMs
 }
 
+// validatePort accepts only a plain decimal number in the 1..65535 range.
+// strconv.Atoi alone would also accept a leading "+", and net.Listen happily
+// binds ":+8080", but the dashboard then prints http://localhost:+8080, which
+// no client can open, so the digits are checked explicitly (#94). Leading
+// zeros stay accepted: "0080" is in range and browsers parse
+// http://localhost:0080 as port 80.
 func validatePort(port string) error {
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return invalidPortError(port)
+		}
+	}
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("invalid port %q: must be an integer between 1 and 65535", port)
+		return invalidPortError(port)
 	}
 	return nil
+}
+
+func invalidPortError(port string) error {
+	return fmt.Errorf("invalid port %q: must be an integer between 1 and 65535", port)
 }
 
 func runWeb(port string, days int) error {
